@@ -82,33 +82,25 @@ def generate_chart(input_file: str, output_file: str) -> None:
     ]
 
     # ── Plot ──────────────────────────────────────────────────────────────────
-    fig, (ax_queries, ax_avg) = plt.subplots(1, 2, figsize=(14, 5))
-    fig.suptitle("QAS Sensitivity Analysis", fontsize=14, fontweight="bold")
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.set_title("QAS vs Weight (w) for Sakila Benchmark Queries", fontsize=13)
 
     # Per-query lines
     for i, (result, qas_values) in enumerate(zip(results, qas_by_query)):
-        label = f"Q{i+1}: {result.test_case.natural_language[:40]}{'...' if len(result.test_case.natural_language) > 40 else ''}"
-        ax_queries.plot(weights, qas_values, marker="o", label=label)
+        ax.plot(weights, qas_values, marker="o", label=f"Q{i + 1}")
 
-    ax_queries.set_title("QAS per Query vs Weight (w)")
-    ax_queries.set_xlabel("Weight (w)  [0=semantic, 1=result-set]")
-    ax_queries.set_ylabel("QAS")
-    ax_queries.set_xlim(0.0, 1.0)
-    ax_queries.set_ylim(0.0, 1.05)
-    ax_queries.legend(fontsize=7, loc="lower left")
-    ax_queries.grid(True, linestyle="--", alpha=0.5)
+    # Average QAS as a dashed black line
+    ax.plot(weights, avg_qas, linestyle="--", color="black", linewidth=2, label="Average QAS")
 
-    # Average QAS line
-    ax_avg.plot(
-        weights, avg_qas, marker="s", color="crimson", linewidth=2, label="Average QAS"
+    ax.set_xlabel(
+        "Weight (w)\nLow w = more semantic focus | High w = more result-set focus",
+        fontsize=10,
     )
-    ax_avg.set_title("Average QAS vs Weight (w)")
-    ax_avg.set_xlabel("Weight (w)  [0=semantic, 1=result-set]")
-    ax_avg.set_ylabel("Average QAS")
-    ax_avg.set_xlim(0.0, 1.0)
-    ax_avg.set_ylim(0.0, 1.05)
-    ax_avg.legend(fontsize=9)
-    ax_avg.grid(True, linestyle="--", alpha=0.5)
+    ax.set_ylabel("QAS")
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.05)
+    ax.legend(fontsize=9, loc="lower right", ncol=2)
+    ax.grid(True, linestyle="--", alpha=0.5)
 
     fig.tight_layout()
 
