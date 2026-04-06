@@ -150,10 +150,14 @@ def select_relevant_columns(
         payload = _extract_json_object(message)
 
         generated_columns = [
-            col for col in payload.get("generated_columns", []) if col in result_gen.columns
+            col
+            for col in payload.get("generated_columns", [])
+            if col in result_gen.columns
         ]
         expected_columns = [
-            col for col in payload.get("expected_columns", []) if col in result_ref.columns
+            col
+            for col in payload.get("expected_columns", [])
+            if col in result_ref.columns
         ]
 
         raw_mapping = payload.get("column_mapping", {})

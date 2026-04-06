@@ -15,6 +15,7 @@ from typing import List
 
 from openai import OpenAI
 from openpyxl import Workbook
+from openpyxl.chart import LineChart, Reference
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
@@ -90,9 +91,130 @@ def export_to_excel(
     ws_info = wb.create_sheet("Info")
     _populate_info_sheet(ws_info, summary_stats)
 
+    # Sheet 4: QAS sensitivity analysis
+    ws_analysis = wb.create_sheet("QAS Analysis")
+    _populate_qas_analysis_sheet(ws_analysis, results)
+
     # Save workbook
     wb.save(output_file)
     print(f"\n✓ Excel report saved to: {output_file}")
+
+
+def _clamp_score(value: float) -> float:
+    """Clamp score to [0, 1]."""
+    return max(0.0, min(1.0, value))
+
+
+def _populate_qas_analysis_sheet(ws, results: List[MetricResult]) -> None:
+    """Populate a weight sweep sheet and add charts for QAS sensitivity analysis."""
+    ws["A1"] = "QAS Sensitivity Analysis"
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A3"] = (
+        "Use this sheet to see how each query's QAS changes as w moves from 0.0 to 1.0."
+    )
+    ws["A4"] = (
+        "Higher w gives more weight to table similarity. Lower w gives more weight to semantic similarity."
+    )
+    ws["A5"] = (
+        "Interpretation: low w focuses on SQL semantic similarity; high w focuses on result-set correctness."
+    )
+
+    weights = [index / 10 for index in range(11)]
+    headers = ["Weight (w)"]
+    headers.extend([f"Q{index + 1}" for index in range(len(results))])
+    headers.append("Average QAS")
+
+    for col_idx, header in enumerate(headers, start=1):
+        cell = ws.cell(row=6, column=col_idx)
+        cell.value = header
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill(
+            start_color="4472C4", end_color="4472C4", fill_type="solid"
+        )
+        cell.alignment = Alignment(horizontal="center")
+
+    for row_offset, weight in enumerate(weights, start=7):
+        ws.cell(row=row_offset, column=1).value = weight
+        qas_values = []
+        for result_index, result in enumerate(results, start=2):
+            qas_value = _clamp_score(
+                (1 - weight) * result.semantic_sim
+                + weight * result.table_sim
+                - result.missing_column_penalty
+            )
+            ws.cell(row=row_offset, column=result_index).value = qas_value
+            qas_values.append(qas_value)
+
+        avg_qas = sum(qas_values) / len(qas_values) if qas_values else 0.0
+        ws.cell(row=row_offset, column=len(headers)).value = avg_qas
+
+    ws["N1"] = "Query Legend"
+    ws["N1"].font = Font(bold=True, size=12)
+    ws["N2"] = "Series"
+    ws["O2"] = "Natural Language"
+    for cell_ref in ["N2", "O2"]:
+        ws[cell_ref].font = Font(bold=True, color="FFFFFF")
+        ws[cell_ref].fill = PatternFill(
+            start_color="4472C4", end_color="4472C4", fill_type="solid"
+        )
+
+    for index, result in enumerate(results, start=1):
+        ws.cell(row=index + 2, column=14).value = f"Q{index}"
+        ws.cell(row=index + 2, column=15).value = result.test_case.natural_language
+
+    ws["N10"] = "How to Read This"
+    ws["N10"].font = Font(bold=True, size=12)
+    ws["N11"] = "w close to 0.0"
+    ws["O11"] = "More focus on SQL semantic similarity (S_C)."
+    ws["N12"] = "w close to 1.0"
+    ws["O12"] = "More focus on result-set/table similarity (S_T)."
+    ws["N13"] = "Flat line"
+    ws["O13"] = "Query score is not very sensitive to the weight choice."
+    ws["N14"] = "Steep line"
+    ws["O14"] = (
+        "Query score depends strongly on whether you prioritize semantics or execution output."
+    )
+
+    chart = LineChart()
+    chart.title = "QAS vs Weight by Query"
+    chart.style = 2
+    chart.y_axis.title = "QAS"
+    chart.x_axis.title = "Weight (w)"
+    chart.height = 10
+    chart.width = 20
+
+    data = Reference(ws, min_col=2, max_col=len(headers), min_row=6, max_row=17)
+    cats = Reference(ws, min_col=1, min_row=7, max_row=17)
+    chart.add_data(data, titles_from_data=True)
+    chart.set_categories(cats)
+    chart.legend.position = "r"
+    ws.add_chart(chart, "A20")
+
+    avg_chart = LineChart()
+    avg_chart.title = "Average QAS vs Weight"
+    avg_chart.style = 10
+    avg_chart.y_axis.title = "Average QAS"
+    avg_chart.x_axis.title = "Weight (w)"
+    avg_chart.height = 8
+    avg_chart.width = 12
+
+    avg_data = Reference(
+        ws,
+        min_col=len(headers),
+        max_col=len(headers),
+        min_row=6,
+        max_row=17,
+    )
+    avg_chart.add_data(avg_data, titles_from_data=True)
+    avg_chart.set_categories(cats)
+    ws.add_chart(avg_chart, "V20")
+
+    ws.freeze_panes = "A7"
+    ws.column_dimensions["A"].width = 12
+    for col_idx in range(2, len(headers) + 1):
+        ws.column_dimensions[get_column_letter(col_idx)].width = 12
+    ws.column_dimensions["N"].width = 10
+    ws.column_dimensions["O"].width = 40
 
 
 def _populate_summary_sheet(
@@ -204,9 +326,7 @@ def _populate_results_sheet(ws, results: List[MetricResult]) -> None:
         ws.cell(row=row_idx, column=12).value = ", ".join(
             result.missing_expected_columns
         )
-        ws.cell(row=row_idx, column=13).value = (
-            f"{result.missing_column_penalty:.4f}"
-        )
+        ws.cell(row=row_idx, column=13).value = f"{result.missing_column_penalty:.4f}"
         ws.cell(row=row_idx, column=14).value = result.column_selection_source
         ws.cell(row=row_idx, column=15).value = (
             f"{result.column_selection_confidence:.2f}"
@@ -251,9 +371,7 @@ def _populate_info_sheet(ws, summary_stats: dict) -> None:
     ws["B5"] = "QAS = (1-w)*SemanticSim + w*TableSim - MissingColumnPenalty"
 
     ws["A6"] = "Intent-Aware Columns"
-    ws["B6"] = (
-        f"enabled={COLUMN_SELECTION_LLM_ENABLED}, model={COLUMN_SELECTION_MODEL}"
-    )
+    ws["B6"] = f"enabled={COLUMN_SELECTION_LLM_ENABLED}, model={COLUMN_SELECTION_MODEL}"
 
     ws["A7"] = "Missing Column Penalty Weight"
     ws["B7"] = f"{MISSING_COLUMN_PENALTY_WEIGHT:.2f}"
@@ -269,7 +387,12 @@ def _populate_info_sheet(ws, summary_stats: dict) -> None:
         "  python main.py --weight 0.1    # 90% semantic, 10% table",
         "  python main.py --weight 0.7    # 30% semantic, 70% table",
         "",
-        "The default weight is 0.3 (70% semantic, 30% table similarity).",
+        (
+            f"The default weight is {DEFAULT_QAS_WEIGHT:.1f} "
+            f"({1 - DEFAULT_QAS_WEIGHT:.0%} semantic, {DEFAULT_QAS_WEIGHT:.0%} table similarity)."
+        ),
+        "Low w means the benchmark cares more about SQL semantic similarity.",
+        "High w means the benchmark cares more about result-set correctness.",
     ]
 
     row = 10
@@ -277,8 +400,8 @@ def _populate_info_sheet(ws, summary_stats: dict) -> None:
         ws[f"A{row}"] = instruction
         row += 1
 
-    ws["A19"] = "Metric Definitions"
-    ws["A19"].font = Font(bold=True, size=11)
+    ws["A21"] = "Metric Definitions"
+    ws["A21"].font = Font(bold=True, size=11)
 
     definitions = [
         ("EM (Exact Match)", "Binary: 1 if normalized SQL strings match, 0 otherwise"),
@@ -291,7 +414,7 @@ def _populate_info_sheet(ws, summary_stats: dict) -> None:
         ),
     ]
 
-    row = 20
+    row = 22
     for name, definition in definitions:
         ws[f"A{row}"] = name
         ws[f"A{row}"].font = Font(bold=True)
@@ -337,9 +460,7 @@ Examples:
         "--table-order-sensitive",
         action="store_true",
         default=TABLE_SIM_ORDER_SENSITIVE,
-        help=(
-            "Use order-sensitive table similarity (default is order-insensitive)."
-        ),
+        help=("Use order-sensitive table similarity (default is order-insensitive)."),
     )
     parser.add_argument(
         "--table-order-mismatch-weight",
@@ -401,9 +522,7 @@ Examples:
         + ("order-sensitive" if args.table_order_sensitive else "order-insensitive")
         + ")"
     )
-    print(
-        f"   (Order mismatch weight: {args.table_order_mismatch_weight:.2f})"
-    )
+    print(f"   (Order mismatch weight: {args.table_order_mismatch_weight:.2f})")
     print()
 
     results, summary_stats = run_benchmark(

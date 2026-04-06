@@ -74,7 +74,7 @@ For each test case:
 ├─────────────────────────────────────────────────────────────┤
 │ 7. Query Affinity Score (QAS)                              │
 │    - QAS = (1-w)*S_C + w*S_T - missing-column penalty      │
-│    - Default w=0.3 (70% semantic, 30% table)               │
+│    - Default w=0.7 (30% semantic, 70% table)               │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -143,7 +143,7 @@ Create a JSON file with test cases:
 
 ### Output Format
 
-The tool generates an Excel file with 3 sheets:
+The tool generates an Excel file with 4 sheets:
 
 **Sheet 1: Summary**
 - Total number of tests
@@ -162,6 +162,12 @@ The tool generates an Excel file with 3 sheets:
 - Metric definitions
 - Examples for testing different weights
 
+**Sheet 4: QAS Analysis**
+- QAS values for each query across a sweep of `w` from `0.0` to `1.0`
+- Line chart with one series per query
+- Average QAS trend chart
+- Guidance for interpreting low-`w` vs high-`w` behavior
+
 ## Configuring QAS Weight
 
 The Query Affinity Score balances semantic similarity with intent-aware table similarity, then deducts missing expected columns:
@@ -171,7 +177,7 @@ QAS = (1 - w) * SemanticSim + w * TableSim - MissingColumnPenalty
 ```
 
 - **w=0.0**: Pure semantic similarity (100% code structure)
-- **w=0.3**: Default (70% code, 30% results)
+- **w=0.7**: Default (30% code, 70% results)
 - **w=0.5**: Equal weight (50/50)
 - **w=1.0**: Pure table similarity (100% results)
 
@@ -235,8 +241,8 @@ This suite uses **LM Studio** for embeddings and optional column-selection judgi
 1. Download and install LM Studio from https://lmstudio.ai/
 2. Load an embedding model for semantic similarity
 3. Optionally load a chat/instruction model for column selection
-3. Start the Local API Server (default: `http://localhost:1234/v1`)
-4. The suite will auto-connect to the configured base URL
+3. Start the Local API Server
+4. The suite will auto-connect to the configured base URL from `config.py`
 
 Configured models live in `config.py`.
 
@@ -283,7 +289,7 @@ def calculate_custom_metric(gen_result, ref_result) -> float:
 
 ### "Could not connect to LM Studio"
 
-- Check LM Studio is running: `http://localhost:1234/v1`
+- Check LM Studio is running on the configured base URL in `config.py`
 - Ensure a model is loaded in LM Studio
 - The suite will continue with fallback (similarity = 0)
 
@@ -306,6 +312,19 @@ def calculate_custom_metric(gen_result, ref_result) -> float:
 
 - Bottlenecks are LM Studio API calls and SQL execution on larger query sets
 - Intent-aware judging adds one extra LLM call per test case when enabled
+
+## Weight Interpretation
+
+- Low `w` means QAS leans more on SQL semantic similarity.
+- High `w` means QAS leans more on result-set correctness.
+- If a query's QAS line is flat in the `QAS Analysis` sheet, the score is not very sensitive to the weight choice.
+- If a query's QAS line is steep, the score depends strongly on whether you prioritize SQL semantics or execution output.
+
+### Example QAS Sensitivity Chart
+
+The chart below is generated from the current Sakila benchmark sample and shows how each query's QAS changes as `w` moves from semantic-heavy to result-heavy scoring.
+
+![QAS Sensitivity Example](assets/qas_analysis_example.png)
 
 ## License
 

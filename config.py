@@ -2,8 +2,8 @@
 
 # Default QAS weighting parameter
 # QAS = (1 - DEFAULT_QAS_WEIGHT) * semantic_sim + DEFAULT_QAS_WEIGHT * table_sim
-# 0.3 means: 70% semantic similarity, 30% table similarity
-DEFAULT_QAS_WEIGHT = 0.3
+# 0.7 means: 30% semantic similarity, 70% table similarity
+DEFAULT_QAS_WEIGHT = 0.7
 
 # LM Studio configuration
 # LM Studio is OpenAI-compatible local inference server
