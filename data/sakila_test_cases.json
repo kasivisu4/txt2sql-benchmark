@@ -1,0 +1,27 @@
+[
+  {
+    "natural_language": "Show first 10 actor first and last names",
+    "generated_sql": "SELECT first_name, last_name FROM actor LIMIT 10",
+    "expected_sql": "SELECT first_name, last_name FROM actor LIMIT 10"
+  },
+  {
+    "natural_language": "Count category wise movies",
+    "expected_sql": "SELECT c.name,c.category_id, COUNT(fc.film_id) AS film_count FROM category c LEFT JOIN film_category fc ON c.category_id = fc.category_id GROUP BY c.category_id, c.name",
+    "generated_sql": "SELECT c.name, COUNT(fc.film_id) AS film_count FROM category c LEFT JOIN film_category fc ON c.category_id = fc.category_id GROUP BY c.category_id, c.name"
+  },
+  {
+    "natural_language": "List first 10 films with title and release year",
+    "generated_sql": "SELECT title, release_year FROM film LIMIT 10",
+    "expected_sql": "SELECT title, release_year FROM film LIMIT 10"
+  },
+  {
+    "natural_language": "Get all categories ordered by name",
+    "generated_sql": "SELECT name FROM category",
+    "expected_sql": "SELECT name FROM category ORDER BY name desc"
+  },
+  {
+    "natural_language": "Show store ids and manager staff ids",
+    "generated_sql": "SELECT store_id, manager_staff_id FROM store",
+    "expected_sql": "SELECT store_id, manager_staff_id FROM store"
+  }
+]

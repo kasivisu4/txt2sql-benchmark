@@ -1,0 +1,27 @@
+[
+  {
+    "natural_language": "Find all users aged over 30",
+    "generated_sql": "SELECT id, name FROM users WHERE age > 30",
+    "expected_sql": "SELECT id, name FROM users WHERE age > 30"
+  },
+  {
+    "natural_language": "Count employees by department",
+    "generated_sql": "SELECT department, COUNT(*) as count FROM employees GROUP BY department",
+    "expected_sql": "SELECT department, COUNT(*) as count FROM employees GROUP BY department"
+  },
+  {
+    "natural_language": "Get products cheaper than 100 dollars",
+    "generated_sql": "SELECT id, name, price FROM products WHERE price < 100",
+    "expected_sql": "SELECT * FROM products WHERE price < 100"
+  },
+  {
+    "natural_language": "Find senior managers with management experience",
+    "generated_sql": "SELECT name FROM users WHERE role = 'manager'",
+    "expected_sql": "SELECT id, name FROM users WHERE age > 30"
+  },
+  {
+    "natural_language": "List all active customers",
+    "generated_sql": "SELECT * FROM customers WHERE status = 'active'",
+    "expected_sql": "SELECT * FROM products WHERE price < 100"
+  }
+]

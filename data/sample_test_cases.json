@@ -1,0 +1,17 @@
+[
+  {
+    "natural_language": "Find all users older than 30 years",
+    "generated_sql": "SELECT id, name FROM users WHERE age > 30",
+    "expected_sql": "SELECT id, name FROM users WHERE age > 30"
+  },
+  {
+    "natural_language": "Count employees by department",
+    "generated_sql": "SELECT department, COUNT(*) as count FROM employees GROUP BY department",
+    "expected_sql": "SELECT department, COUNT(*) as count FROM employees GROUP BY department"
+  },
+  {
+    "natural_language": "Get products priced under 100 dollars",
+    "generated_sql": "SELECT * FROM products WHERE price < 100",
+    "expected_sql": "SELECT * FROM products WHERE price < 100"
+  }
+]
