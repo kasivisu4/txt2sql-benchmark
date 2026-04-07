@@ -1,11 +1,11 @@
-"""Standalone script to generate the QAS sensitivity chart.
+"""Standalone script to generate the composite score component chart.
 
-Runs the benchmark against LM Studio + sakila.db, sweeps w from 0.0 to 1.0,
-and saves a matplotlib line chart to assets/qas_analysis_example.png.
+Runs the benchmark against LM Studio + sakila.db and saves a matplotlib bar
+chart showing per-query component breakdown to assets/composite_analysis.png.
 
 Usage:
     python generate_chart.py
-    python generate_chart.py --input data/sakila_test_cases.json --output assets/qas_analysis_example.png
+    python generate_chart.py --input data/sakila_test_cases.json --output assets/composite_analysis.png
 """
 
 import argparse
@@ -16,10 +16,14 @@ import matplotlib
 
 matplotlib.use("Agg")  # non-interactive backend — no GUI window needed
 import matplotlib.pyplot as plt
+import numpy as np
 from openai import OpenAI
 
 from config import (
-    DEFAULT_QAS_WEIGHT,
+    WEIGHT_TABLE_SIM,
+    WEIGHT_SEMANTIC_SIM,
+    WEIGHT_LLM_SCORE,
+    WEIGHT_VES,
     LM_STUDIO_API_URL,
     SQLITE_DB_PATH,
     TABLE_SIM_ORDER_SENSITIVE,
@@ -55,52 +59,51 @@ def generate_chart(input_file: str, output_file: str) -> None:
         test_cases,
         db,
         client,
-        weight=DEFAULT_QAS_WEIGHT,
+        w1=WEIGHT_TABLE_SIM,
+        w2=WEIGHT_SEMANTIC_SIM,
+        w3=WEIGHT_LLM_SCORE,
+        w4=WEIGHT_VES,
         table_order_sensitive=TABLE_SIM_ORDER_SENSITIVE,
         table_order_mismatch_weight=TABLE_SIM_ORDER_MISMATCH_WEIGHT,
     )
 
-    weights = [w / 10 for w in range(11)]  # 0.0, 0.1, ..., 1.0
+    # ── Plot: stacked bar chart of weighted components ────────────────────────
+    labels = [f"Q{i + 1}" for i in range(len(results))]
+    st_vals = [r.table_sim * WEIGHT_TABLE_SIM for r in results]
+    sc_vals = [r.semantic_sim * WEIGHT_SEMANTIC_SIM for r in results]
+    llm_vals = [r.llm_score * WEIGHT_LLM_SCORE for r in results]
+    ves_vals = [r.ves * WEIGHT_VES for r in results]
 
-    # Compute QAS for each query at each weight level
-    qas_by_query = []
-    for result in results:
-        qas_values = []
-        for w in weights:
-            qas = (
-                (1 - w) * result.semantic_sim
-                + w * result.table_sim
-                - result.missing_column_penalty
-            )
-            qas_values.append(max(0.0, min(1.0, qas)))
-        qas_by_query.append(qas_values)
+    x = np.arange(len(labels))
+    width = 0.6
 
-    # Average QAS across all queries at each weight
-    avg_qas = [
-        sum(qas_by_query[q][wi] for q in range(len(results))) / len(results)
-        for wi in range(len(weights))
-    ]
-
-    # ── Plot ──────────────────────────────────────────────────────────────────
     fig, ax = plt.subplots(figsize=(14, 6))
-    ax.set_title("QAS vs Weight (w) for Sakila Benchmark Queries", fontsize=13)
+    ax.set_title("Composite Score Breakdown by Query", fontsize=13)
 
-    # Per-query lines
-    for i, (result, qas_values) in enumerate(zip(results, qas_by_query)):
-        ax.plot(weights, qas_values, marker="o", label=f"Q{i + 1}")
-
-    # Average QAS as a dashed black line
-    ax.plot(weights, avg_qas, linestyle="--", color="black", linewidth=2, label="Average QAS")
-
-    ax.set_xlabel(
-        "Weight (w)\nLow w = more semantic focus | High w = more result-set focus",
-        fontsize=10,
+    bars_st = ax.bar(x, st_vals, width, label=f"S_T (W1={WEIGHT_TABLE_SIM})")
+    bars_sc = ax.bar(
+        x, sc_vals, width, bottom=st_vals, label=f"S_C (W2={WEIGHT_SEMANTIC_SIM})"
     )
-    ax.set_ylabel("QAS")
-    ax.set_xlim(0.0, 1.0)
+    bottom2 = [a + b for a, b in zip(st_vals, sc_vals)]
+    bars_llm = ax.bar(
+        x, llm_vals, width, bottom=bottom2, label=f"LLM (W3={WEIGHT_LLM_SCORE})"
+    )
+    bottom3 = [a + b for a, b in zip(bottom2, llm_vals)]
+    bars_ves = ax.bar(
+        x, ves_vals, width, bottom=bottom3, label=f"VES (W4={WEIGHT_VES})"
+    )
+
+    # Composite score markers
+    composites = [r.composite_score for r in results]
+    ax.plot(x, composites, "ko", markersize=5, label="Composite")
+
+    ax.set_xlabel("Query", fontsize=10)
+    ax.set_ylabel("Score Contribution")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
     ax.set_ylim(0.0, 1.05)
-    ax.legend(fontsize=9, loc="lower right", ncol=2)
-    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(fontsize=9, loc="lower right")
+    ax.grid(True, axis="y", linestyle="--", alpha=0.5)
 
     fig.tight_layout()
 
@@ -111,7 +114,7 @@ def generate_chart(input_file: str, output_file: str) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate QAS sensitivity chart")
+    parser = argparse.ArgumentParser(description="Generate composite score chart")
     parser.add_argument(
         "--input",
         default="data/sakila_test_cases.json",
@@ -119,7 +122,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--output",
-        default="assets/qas_analysis_example.png",
+        default="assets/composite_analysis.png",
         help="Output PNG file path",
     )
     args = parser.parse_args()

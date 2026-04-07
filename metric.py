@@ -5,10 +5,14 @@ Computes:
 - EX (Execution Accuracy): Binary comparison of query results
 - S_C (Semantic Similarity): Cosine similarity of code embeddings from LM Studio
 - S_T (Table Similarity): Edit distance-based similarity of result tables
-- QAS (Query Affinity Score): Weighted combination of S_C and S_T
+- LLM Score: LLM-as-judge evaluation of generated SQL quality
+- VES (Valid Efficiency Score): Execution speed relative to reference query
+- Composite Score: Weighted combination of S_T, S_C, LLM Score, and VES
 """
 
 import json
+import math
+import re
 from typing import List
 import time
 from model import (
@@ -22,14 +26,18 @@ from model import (
 from mock_database import MockDatabaseExecutor
 from config import (
     EXECUTION_FAILURE_PENALTY,
-    DEFAULT_QAS_WEIGHT,
+    WEIGHT_TABLE_SIM,
+    WEIGHT_SEMANTIC_SIM,
+    WEIGHT_LLM_SCORE,
+    WEIGHT_VES,
     EMBEDDING_MODEL,
-    MISSING_COLUMN_PENALTY_WEIGHT,
     TABLE_SIM_ORDER_SENSITIVE,
     TABLE_SIM_ORDER_MISMATCH_WEIGHT,
     COLUMN_SELECTION_LLM_ENABLED,
     COLUMN_SELECTION_MODEL,
     COLUMN_SELECTION_TEMPERATURE,
+    LLM_JUDGE_MODEL,
+    LLM_JUDGE_TEMPERATURE,
 )
 
 
@@ -278,64 +286,186 @@ def _calculate_table_similarity_from_results(
     return max(0.0, min(1.0, table_sim))
 
 
-def calculate_missing_column_penalty(
+def calculate_ves(
+    ex: bool,
+    exec_time_gen_ms: float,
+    exec_time_ref_ms: float,
+) -> float:
+    """Calculate Valid Efficiency Score (VES).
+
+    Based on the BIRD benchmark metric. Measures how efficiently the
+    generated SQL executes relative to the reference query.
+
+    Formula: VES = 1(valid) * sqrt(ref_time / gen_time)
+    - 1(valid) = 1 if EX is True (correct results), else 0
+    - Capped at 1.0 to maintain [0, 1] range
+
+    Args:
+        ex: Whether the generated query produces correct results (EX metric)
+        exec_time_gen_ms: Execution time of generated query in milliseconds
+        exec_time_ref_ms: Execution time of reference query in milliseconds
+
+    Returns:
+        VES score in range [0, 1]
+    """
+    if not ex:
+        return 0.0
+
+    if exec_time_gen_ms <= 0:
+        return 0.0
+
+    if exec_time_ref_ms <= 0:
+        return 1.0
+
+    ves = math.sqrt(exec_time_ref_ms / exec_time_gen_ms)
+    return min(1.0, ves)
+
+
+def _format_query_result(result: QueryResult, max_rows: int = 5) -> str:
+    """Format a QueryResult into a concise string for LLM consumption."""
+    if not result.succeeded:
+        return f"ERROR: {result.error_message}"
+    if not result.rows:
+        return f"Columns: {result.columns}\nRows: (empty)"
+    preview = result.rows[:max_rows]
+    lines = [f"Columns: {result.columns}"]
+    for row in preview:
+        lines.append(str(row))
+    if len(result.rows) > max_rows:
+        lines.append(f"... ({len(result.rows)} rows total)")
+    return "\n".join(lines)
+
+
+def calculate_llm_score(
+    natural_language: str,
+    generated_sql: str,
+    expected_sql: str,
     result_gen: QueryResult,
     result_ref: QueryResult,
-    penalty_weight: float = MISSING_COLUMN_PENALTY_WEIGHT,
-) -> tuple[list[str], float]:
-    """Calculate QAS penalty for expected columns missing from generated output."""
-    if not result_ref.columns:
-        return [], 0.0
+    openai_client,
+) -> tuple[float, str]:
+    """Calculate LLM-as-Judge score for generated SQL quality.
 
-    missing_expected_columns = [
-        col for col in result_ref.columns if col not in result_gen.columns
-    ]
-    penalty_ratio = len(missing_expected_columns) / max(1, len(result_ref.columns))
-    penalty = penalty_weight * penalty_ratio
-    return missing_expected_columns, max(0.0, min(1.0, penalty))
-
-
-def calculate_em(generated_sql: str, expected_sql: str) -> bool:
-    """Calculate Exact Match (EM).
-
-    Compares normalized SQL strings for exact equality.
+    Sends the natural language query, both SQL queries, and their execution
+    results to an LLM which classifies the match as fully-matched (1.0),
+    partial (0.5), or no match (0.0), along with a reasoning explanation.
 
     Args:
-        generated_sql: Generated SQL query
-        expected_sql: Expected (reference) SQL query
+        natural_language: The original natural language query
+        generated_sql: The generated SQL query to evaluate
+        expected_sql: The reference (expected) SQL query
+        result_gen: Execution result of the generated SQL
+        result_ref: Execution result of the reference SQL
+        openai_client: OpenAI-compatible client (or None)
 
     Returns:
-        True if normalized SQLs match, False otherwise
+        Tuple of (score, reasoning).
+        Score: 1.0 (fully-matched), 0.5 (partial), or 0.0 (no match).
+        Reasoning: LLM explanation for the classification.
     """
-    gen_norm = normalize_sql(generated_sql)
-    exp_norm = normalize_sql(expected_sql)
-    return gen_norm == exp_norm
+    if normalize_sql(generated_sql) == normalize_sql(expected_sql):
+        return 1.0, "SQL queries are identical after normalization."
+
+    if openai_client is None:
+        return 0.5, "LLM unavailable — default score."
+
+    gen_result_str = _format_query_result(result_gen)
+    ref_result_str = _format_query_result(result_ref)
+
+    try:
+        response = openai_client.chat.completions.create(
+            model=LLM_JUDGE_MODEL,
+            temperature=LLM_JUDGE_TEMPERATURE,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert SQL evaluator. You will be given a natural "
+                        "language question, a generated SQL query, a reference SQL "
+                        "query, and the execution results of both queries. "
+                        "Classify the generated SQL into exactly one category:\n\n"
+                        "- fully-matched: The generated SQL correctly and completely "
+                        "answers the question with equivalent logic to the reference.\n"
+                        "- partial: The generated SQL partially answers the question "
+                        "or captures some but not all aspects of the intent.\n"
+                        "- no match: The generated SQL does not answer the question "
+                        "or is fundamentally wrong.\n\n"
+                        "Respond in exactly this format (two lines):\n"
+                        "Classification: <fully-matched | partial | no match>\n"
+                        "Reasoning: <one or two sentence explanation>"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Natural language question: {natural_language}\n\n"
+                        f"Generated SQL: {generated_sql}\n"
+                        f"Generated SQL result:\n{gen_result_str}\n\n"
+                        f"Reference SQL: {expected_sql}\n"
+                        f"Reference SQL result:\n{ref_result_str}\n\n"
+                        "Evaluation:"
+                    ),
+                },
+            ],
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        message = raw.lower()
+
+        # Parse reasoning
+        reasoning = ""
+        for line in raw.split("\n"):
+            if line.strip().lower().startswith("reasoning:"):
+                reasoning = line.strip()[len("reasoning:"):].strip()
+                break
+        if not reasoning:
+            reasoning = raw  # Fallback: use full response as reasoning
+
+        if "fully-matched" in message or "fully matched" in message:
+            return 1.0, reasoning
+        elif "no match" in message or "no_match" in message:
+            return 0.0, reasoning
+        elif "partial" in message:
+            return 0.5, reasoning
+        else:
+            print(
+                f"Warning: Unexpected LLM judge response: {raw!r}, defaulting to 0.5"
+            )
+            return 0.5, reasoning or "Unexpected response from LLM judge."
+
+    except Exception as e:
+        print(f"Warning: Failed to compute LLM judge score: {e}")
+        return 0.5, f"LLM error: {e}"
 
 
-def calculate_ex(result_gen: QueryResult, result_ref: QueryResult) -> bool:
-    """Calculate Execution Accuracy (EX).
+def calculate_composite_score(
+    table_sim: float,
+    semantic_sim: float,
+    llm_score: float,
+    ves: float,
+    w1: float = WEIGHT_TABLE_SIM,
+    w2: float = WEIGHT_SEMANTIC_SIM,
+    w3: float = WEIGHT_LLM_SCORE,
+    w4: float = WEIGHT_VES,
+) -> float:
+    """Calculate Composite Score.
 
-    Compares query execution results.
-    If either query failed, returns False.
-    Otherwise, returns True if results are identical.
+    Formula: Composite = (W1 * S_T) + (W2 * S_C) + (W3 * LLM_SCORE) + (W4 * VES)
 
     Args:
-        result_gen: Generated query result
-        result_ref: Reference query result
+        table_sim: Table similarity score (S_T) [0, 1]
+        semantic_sim: Semantic similarity score (S_C) [0, 1]
+        llm_score: LLM-as-Judge score [0, 1]
+        ves: Valid Efficiency Score [0, 1]
+        w1: Weight for table similarity (default from config)
+        w2: Weight for semantic similarity (default from config)
+        w3: Weight for LLM score (default from config)
+        w4: Weight for VES (default from config)
 
     Returns:
-        True if both executed successfully and results match, False otherwise
+        Composite score in range [0, 1]
     """
-    if not result_gen.succeeded or not result_ref.succeeded:
-        return False
-
-    if len(result_gen.rows) != len(result_ref.rows):
-        return False
-
-    if set(result_gen.columns) != set(result_ref.columns):
-        return False
-
-    return result_gen.rows == result_ref.rows
+    score = w1 * table_sim + w2 * semantic_sim + w3 * llm_score + w4 * ves
+    return max(0.0, min(1.0, score))
 
 
 def calculate_semantic_similarity(
@@ -388,78 +518,14 @@ def calculate_semantic_similarity(
         return 0.5
 
 
-def calculate_table_similarity(
-    generated_sql: str,
-    expected_sql: str,
-    db_executor: MockDatabaseExecutor,
-    order_sensitive: bool = TABLE_SIM_ORDER_SENSITIVE,
-    order_mismatch_weight: float = TABLE_SIM_ORDER_MISMATCH_WEIGHT,
-) -> float:
-    """Calculate table similarity using edit distance on result columns.
-
-    Algorithm:
-    1. Return 1.0 if SQLs match exactly
-    2. Execute both queries; return 0.0 if generated fails
-    3. For each column in generated result, find best-match reference column
-    4. Aggregate and normalize edit distances
-
-    Args:
-        generated_sql: Generated SQL query
-        expected_sql: Expected SQL query
-        db_executor: Database executor (mock or real)
-        order_sensitive: Whether to preserve row order during comparison
-        order_mismatch_weight: Soft penalty weight for shuffled order in
-            order-insensitive mode (0 disables penalty)
-
-    Returns:
-        Table similarity score in range [0, 1]
-    """
-    # Step 1: Check exact match
-    if normalize_sql(generated_sql) == normalize_sql(expected_sql):
-        return 1.0
-
-    # Step 2: Execute both queries
-    result_gen = db_executor.execute(generated_sql)
-    result_ref = db_executor.execute(expected_sql)
-
-    return _calculate_table_similarity_from_results(
-        result_gen,
-        result_ref,
-        order_sensitive=order_sensitive,
-        order_mismatch_weight=order_mismatch_weight,
-    )
-
-
-def calculate_qas(
-    semantic_sim: float,
-    table_sim: float,
-    weight: float = DEFAULT_QAS_WEIGHT,
-    missing_column_penalty: float = 0.0,
-) -> float:
-    """Calculate Query Affinity Score (QAS).
-
-    Formula: QAS = (1 - weight) * semantic_sim + weight * table_sim
-
-    Default weight=0.3 means 70% semantic, 30% table similarity.
-
-    Args:
-        semantic_sim: Semantic similarity score [0, 1]
-        table_sim: Table similarity score [0, 1]
-        weight: Weighting parameter (default 0.3)
-        missing_column_penalty: Penalty deducted for missing expected columns
-
-    Returns:
-        QAS score in range [0, 1]
-    """
-    qas = (1 - weight) * semantic_sim + weight * table_sim - missing_column_penalty
-    return max(0.0, min(1.0, qas))  # Clamp to [0, 1]
-
-
 def run_benchmark(
     test_cases: List[TestCase],
     db_executor: MockDatabaseExecutor,
     openai_client,
-    weight: float = DEFAULT_QAS_WEIGHT,
+    w1: float = WEIGHT_TABLE_SIM,
+    w2: float = WEIGHT_SEMANTIC_SIM,
+    w3: float = WEIGHT_LLM_SCORE,
+    w4: float = WEIGHT_VES,
     table_order_sensitive: bool = TABLE_SIM_ORDER_SENSITIVE,
     table_order_mismatch_weight: float = TABLE_SIM_ORDER_MISMATCH_WEIGHT,
 ) -> tuple[List[MetricResult], dict]:
@@ -467,16 +533,21 @@ def run_benchmark(
 
     For each test case:
     1. Calculate EM (exact match of SQL)
-    2. Execute both queries and calculate EX (execution accuracy)
+    2. Execute both queries (with timing) and calculate EX
     3. Calculate S_C (semantic similarity using embeddings)
     4. Calculate S_T (table similarity using edit distance)
-    5. Calculate QAS (weighted combination)
+    5. Calculate LLM Score (LLM-as-judge evaluation)
+    6. Calculate VES (valid efficiency score)
+    7. Calculate Composite Score (weighted combination)
 
     Args:
         test_cases: List of test cases to benchmark
         db_executor: Database executor for query execution
-        openai_client: OpenAI-compatible client for embeddings
-        weight: QAS weight parameter (default 0.3)
+        openai_client: OpenAI-compatible client for embeddings and LLM
+        w1: Weight for table similarity (S_T)
+        w2: Weight for semantic similarity (S_C)
+        w3: Weight for LLM score
+        w4: Weight for VES
         table_order_sensitive: Order-sensitive table similarity mode
         table_order_mismatch_weight: Soft order mismatch penalty in
             order-insensitive mode
@@ -491,11 +562,18 @@ def run_benchmark(
         test_start = time.time()
 
         # Step 1: Calculate EM
-        em = calculate_em(test_case.generated_sql, test_case.expected_sql)
+        em = normalize_sql(test_case.generated_sql) == normalize_sql(
+            test_case.expected_sql
+        )
 
-        # Step 2: Execute queries for EX calculation
+        # Step 2: Execute queries with individual timing
+        gen_start = time.time()
         result_gen = db_executor.execute(test_case.generated_sql)
+        exec_time_gen_ms = (time.time() - gen_start) * 1000
+
+        ref_start = time.time()
         result_ref = db_executor.execute(test_case.expected_sql)
+        exec_time_ref_ms = (time.time() - ref_start) * 1000
 
         # Step 2a: Select intent-relevant columns for evaluation
         selection = select_relevant_columns(
@@ -524,16 +602,22 @@ def run_benchmark(
             projected_ref = result_ref
 
         # Step 2b: Calculate EX
-        ex = calculate_ex(projected_gen, projected_ref)
+        ex = (
+            projected_gen.succeeded
+            and projected_ref.succeeded
+            and len(projected_gen.rows) == len(projected_ref.rows)
+            and set(projected_gen.columns) == set(projected_ref.columns)
+            and projected_gen.rows == projected_ref.rows
+        )
 
-        # Step 3: Calculate semantic similarity
+        # Step 3: Calculate semantic similarity (S_C)
         semantic_sim = calculate_semantic_similarity(
             test_case.generated_sql,
             test_case.expected_sql,
             openai_client,
         )
 
-        # Step 4: Calculate table similarity
+        # Step 4: Calculate table similarity (S_T)
         table_sim = _calculate_table_similarity_from_results(
             projected_gen,
             projected_ref,
@@ -541,21 +625,33 @@ def run_benchmark(
             order_mismatch_weight=table_order_mismatch_weight,
         )
 
-        # Step 4b: Penalize missing expected columns in generated output
-        missing_expected_columns, missing_column_penalty = (
-            calculate_missing_column_penalty(result_gen, result_ref)
-        )
-
         # Apply penalty if execution failed
         if not result_gen.succeeded:
             table_sim *= 1 - EXECUTION_FAILURE_PENALTY
 
-        # Step 5: Calculate QAS
-        qas = calculate_qas(
-            semantic_sim,
+        # Step 5: Calculate LLM Score
+        llm_score, llm_reasoning = calculate_llm_score(
+            test_case.natural_language,
+            test_case.generated_sql,
+            test_case.expected_sql,
+            result_gen,
+            result_ref,
+            openai_client,
+        )
+
+        # Step 6: Calculate VES
+        ves = calculate_ves(ex, exec_time_gen_ms, exec_time_ref_ms)
+
+        # Step 7: Calculate Composite Score
+        composite = calculate_composite_score(
             table_sim,
-            weight,
-            missing_column_penalty=missing_column_penalty,
+            semantic_sim,
+            llm_score,
+            ves,
+            w1,
+            w2,
+            w3,
+            w4,
         )
 
         # Record result
@@ -566,13 +662,16 @@ def run_benchmark(
             ex=ex,
             semantic_sim=semantic_sim,
             table_sim=table_sim,
-            qas=qas,
+            llm_score=llm_score,
+            llm_reasoning=llm_reasoning,
+            ves=ves,
+            composite_score=composite,
             selected_generated_columns=selection["generated_columns"],
             selected_expected_columns=selection["expected_columns"],
-            missing_expected_columns=missing_expected_columns,
-            missing_column_penalty=missing_column_penalty,
             column_selection_confidence=selection["confidence"],
             column_selection_source=selection["source"],
+            execution_time_gen_ms=exec_time_gen_ms,
+            execution_time_ref_ms=exec_time_ref_ms,
             execution_time_ms=test_time,
         )
         results.append(result)
@@ -581,7 +680,8 @@ def run_benchmark(
             f"[{i+1}/{len(test_cases)}] "
             f"EM={em} EX={ex} "
             f"S_C={semantic_sim:.3f} S_T={table_sim:.3f} "
-            f"MissPen={missing_column_penalty:.3f} QAS={qas:.3f} "
+            f"LLM={llm_score:.3f} VES={ves:.3f} "
+            f"Composite={composite:.3f} "
             f"Cols={selection['generated_columns']} "
             f"(time: {test_time:.1f}ms)"
         )
@@ -603,14 +703,18 @@ def run_benchmark(
         "avg_table_sim": (
             sum(r.table_sim for r in results) / len(results) if results else 0
         ),
-        "avg_missing_column_penalty": (
-            sum(r.missing_column_penalty for r in results) / len(results)
-            if results
-            else 0
+        "avg_llm_score": (
+            sum(r.llm_score for r in results) / len(results) if results else 0
         ),
-        "avg_qas": sum(r.qas for r in results) / len(results) if results else 0,
+        "avg_ves": (sum(r.ves for r in results) / len(results) if results else 0),
+        "avg_composite_score": (
+            sum(r.composite_score for r in results) / len(results) if results else 0
+        ),
         "total_time_ms": total_time,
-        "weight": weight,
+        "w1": w1,
+        "w2": w2,
+        "w3": w3,
+        "w4": w4,
     }
 
     return results, summary_stats

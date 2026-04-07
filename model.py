@@ -32,15 +32,18 @@ class MetricResult:
     test_case: TestCase
     em: bool  # Exact Match (binary)
     ex: bool  # Execution Accuracy (binary)
-    semantic_sim: float  # Semantic similarity [0, 1]
-    table_sim: float  # Table similarity [0, 1]
-    qas: float  # Query Affinity Score [0, 1]
+    semantic_sim: float  # Semantic similarity (S_C) [0, 1]
+    table_sim: float  # Table similarity (S_T) [0, 1]
+    llm_score: float  # LLM-as-Judge score [0, 1]
+    llm_reasoning: str  # LLM judge reasoning text
+    ves: float  # Valid Efficiency Score [0, 1]
+    composite_score: float  # Weighted combination [0, 1]
     selected_generated_columns: List[str] = field(default_factory=list)
     selected_expected_columns: List[str] = field(default_factory=list)
-    missing_expected_columns: List[str] = field(default_factory=list)
-    missing_column_penalty: float = 0.0
     column_selection_confidence: float = 0.0
     column_selection_source: str = "fallback"
+    execution_time_gen_ms: float = 0.0
+    execution_time_ref_ms: float = 0.0
     execution_time_ms: float = 0.0
 
 
@@ -51,7 +54,10 @@ class BenchmarkReport:
     results: List[MetricResult] = field(default_factory=list)
     summary_stats: Dict[str, float] = field(default_factory=dict)
     total_time_ms: float = 0.0
-    weight: float = 0.3
+    weight_table_sim: float = 0.3
+    weight_semantic_sim: float = 0.2
+    weight_llm_score: float = 0.3
+    weight_ves: float = 0.2
 
 
 # ============================================================================

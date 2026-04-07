@@ -39,8 +39,8 @@ Defines all data structures and utility functions.
 **Data Classes:**
 - `TestCase` — Input: {natural_language, generated_sql, expected_sql}
 - `QueryResult` — Database query output: {rows, columns, succeeded, error_message}
-- `MetricResult` — Computed metrics: {em, ex, semantic_sim, table_sim, qas, execution_time_ms}
-- `BenchmarkReport` — Aggregated results: {results[], summary_stats{}, total_time_ms, weight}
+- `MetricResult` — Computed metrics: {em, ex, semantic_sim, table_sim, llm_score, ves, composite_score, execution_time_gen_ms, execution_time_ref_ms, execution_time_ms}
+- `BenchmarkReport` — Aggregated results: {results[], summary_stats{}, total_time_ms, weight_table_sim, weight_semantic_sim, weight_llm_score, weight_ves}
 
 **Utility Functions:**
 - `normalize_sql(sql)` — Lowercase, trim, normalize whitespace for SQL comparison
@@ -53,11 +53,15 @@ Defines all data structures and utility functions.
 Centralized configuration for the entire suite.
 
 **Key Settings:**
-- `DEFAULT_QAS_WEIGHT = 0.3` — Default w for QAS formula
+- `WEIGHT_TABLE_SIM = 0.3` — W1: weight for table similarity (S_T)
+- `WEIGHT_SEMANTIC_SIM = 0.2` — W2: weight for semantic similarity (S_C)
+- `WEIGHT_LLM_SCORE = 0.3` — W3: weight for LLM-as-judge score
+- `WEIGHT_VES = 0.2` — W4: weight for Valid Efficiency Score
 - `LM_STUDIO_API_URL` — Endpoint for embedding service
-- `EMBEDDING_MODEL` — Model name (ignored by LM Studio, uses loaded model)
-- `EXECUTION_FAILURE_PENALTY` — Penalty applied if query execution fails
-- `MOCK_DATABASE_QUERIES` — Hardcoded 3 test queries with expected results
+- `EMBEDDING_MODEL` — Model name for embeddings
+- `LLM_JUDGE_MODEL` — Model name for LLM-as-judge scoring
+- `EXECUTION_FAILURE_PENALTY` — Penalty applied to S_T if query execution fails
+- `MOCK_DATABASE_QUERIES` — Hardcoded test queries with expected results
 
 **Why centralize:** Easy to adjust without modifying code logic
 
@@ -98,27 +102,39 @@ Implements all metric calculations for the benchmark.
    - Handles edge cases (empty results, execution failures)
    - Returns [0,1] clamped value
 
-5. **`calculate_qas(semantic_sim, table_sim, weight) → float [0,1]`**
-   - Combines semantic and table similarity with weighting
-   - Formula: `QAS = (1-weight) * semantic_sim + weight * table_sim`
-   - Default weight=0.3 (70% semantic, 30% table)
-   - User-configurable via CLI flag
+5. **`calculate_llm_score(natural_language, generated_sql, expected_sql, openai_client) → float [0,1]`**
+   - Sends NL query + generated SQL + expected SQL to LLM-as-judge
+   - LLM evaluates on 0.0–1.0 scale: semantic correctness, intent coverage, SQL validity
+   - Returns 1.0 if queries match exactly (optimization)
+   - Returns 0.5 if LLM unavailable (neutral fallback)
 
-6. **`run_benchmark(test_cases, db_executor, openai_client, weight) → (List[MetricResult], dict)`**
+6. **`calculate_ves(ex, exec_time_gen_ms, exec_time_ref_ms) → float [0,1]`**
+   - Based on BIRD benchmark Valid Efficiency Score
+   - Formula: `VES = 1(valid) * sqrt(ref_time / gen_time)`, capped at 1.0
+   - Returns 0.0 if EX=False (invalid results) or gen_time ≤ 0
+
+7. **`calculate_composite_score(table_sim, semantic_sim, llm_score, ves, w1, w2, w3, w4) → float [0,1]`**
+   - Combines all four components with independent weights
+   - Formula: `Composite = (W1 * S_T) + (W2 * S_C) + (W3 * LLM_SCORE) + (W4 * VES)`
+   - User-configurable via CLI flags --w1 --w2 --w3 --w4
+
+8. **`run_benchmark(test_cases, db_executor, openai_client, w1, w2, w3, w4) → (List[MetricResult], dict)`**
    
    Orchestrates full pipeline:
    ```
    For each test case:
      1. Calculate EM
-     2. Execute queries for EX
-     3. Calculate semantic similarity (S_C)
-     4. Calculate table similarity (S_T)
+     2. Execute queries (with per-query timing) → Calculate EX
+     3. Get embeddings → Calculate S_C
+     4. Compare tables → Calculate S_T
      5. Apply execution failure penalty if needed
-     6. Calculate QAS combining C_C and S_T
+     6. LLM-as-judge → Calculate LLM Score
+     7. Compute VES from EX + timing
+     8. Compute Composite = W1*S_T + W2*S_C + W3*LLM + W4*VES
    
    Aggregate statistics:
      - Pass rates (EM, EX)
-     - Average scores (semantic, table, QAS)
+     - Average scores (S_C, S_T, LLM, VES, Composite)
      - Total execution time
    ```
 
@@ -184,7 +200,7 @@ Main application orchestrator and Excel report generator.
 ### Execution Pipeline
 
 ```
-User runs: python main.py --input data/test_cases.json --weight 0.3
+User runs: python main.py --input data/test_cases.json --w1 0.3 --w2 0.2 --w3 0.3 --w4 0.2
                                     │
                                     ▼
                     Load JSON test cases
@@ -194,24 +210,28 @@ User runs: python main.py --input data/test_cases.json --weight 0.3
                     (OpenAI-compatible API)
                                     │
                                     ▼
-                    Initialize MockDatabaseExecutor
+                    Initialize SQLite Database Executor
                                     │
                                     ▼
-            ╔═══════════════════════════════════════╗
-            ║   For each TestCase:                  ║
-            ║   1. Calculate EM (exact match)       ║
-            ║   2. Execute queries → Calculate EX   ║
-            ║   3. Get embeddings → Calculate S_C   ║
-            ║   4. Compare tables → Calculate S_T   ║
-            ║   5. Compute QAS = (1-w)*S_C + w*S_T  ║
-            ╚═════════════════╤══════════════════════╝
-                              │
-                              ▼
+            ╔════════════════════════════════════════════════╗
+            ║   For each TestCase:                          ║
+            ║   1. Calculate EM (exact match)               ║
+            ║   2. Execute queries (timed) → Calculate EX   ║
+            ║   3. Get embeddings → Calculate S_C           ║
+            ║   4. Compare tables → Calculate S_T           ║
+            ║   5. LLM-as-judge → Calculate LLM Score       ║
+            ║   6. Compute VES from EX + timing             ║
+            ║   7. Composite = W1*S_T + W2*S_C + W3*LLM     ║
+            ║                  + W4*VES                     ║
+            ╚═════════════════════╤══════════════════════════╝
+                                 │
+                                 ▼
                     Aggregate summary stats
                               │
                               ▼
                     Generate Excel report
-                    (Summary, Results, Info sheets)
+                    (Summary, Results, Info,
+                     Composite Analysis sheets)
                               │
                               ▼
                    Save report to results/
@@ -287,20 +307,62 @@ Range: [0, 1]
 - 1.0 = identical results
 - 0.0 = completely different results
 
-#### Query Affinity Score (QAS)
+#### LLM Score
 
 ```
-QAS = (1 - w) * S_C + w * S_T
+if sql_gen == sql_ref (normalized):
+    return 1.0
+
+score = LLM_Judge.evaluate(
+    natural_language,
+    generated_sql,
+    expected_sql,
+    criteria=[semantic_correctness, intent_coverage, sql_validity]
+)
+return clamp(score, 0, 1)
+```
+
+Range: [0, 1]
+- 1.0 = LLM considers the SQL a perfect answer
+- 0.0 = LLM sees no meaningful attempt
+- 0.5 = fallback when LLM is unavailable
+
+#### Valid Efficiency Score (VES)
+
+```
+if EX == False:   # generated query produces wrong results
+    return 0.0
+
+VES = sqrt(ref_execution_time / gen_execution_time)
+return min(VES, 1.0)   # cap at 1.0
+```
+
+Range: [0, 1]
+- 1.0 = generated query is at least as fast as the reference
+- 0.0 = generated query is invalid (EX=False)
+- Based on the BIRD benchmark metric
+
+#### Composite Score
+
+```
+Composite = (W1 * S_T) + (W2 * S_C) + (W3 * LLM_SCORE) + (W4 * VES)
 
 where:
-  w = weighting parameter (default 0.3)
-  S_C = semantic similarity
+  W1 = weight for table similarity (default 0.3)
+  W2 = weight for semantic similarity (default 0.2)
+  W3 = weight for LLM score (default 0.3)
+  W4 = weight for VES (default 0.2)
   S_T = table similarity
+  S_C = semantic similarity
+  LLM_SCORE = LLM-as-judge evaluation
+  VES = valid efficiency score
 ```
 
-Default interpretation (w=0.3):
-- 70% weight on semantic similarity (code structure)
-- 30% weight on table similarity (execution results)
+Default weights (W1=0.3, W2=0.2, W3=0.3, W4=0.2):
+- 30% table similarity (result-set correctness)
+- 20% semantic similarity (SQL intent via embeddings)
+- 30% LLM judge (human-like quality assessment)
+- 20% efficiency (execution speed)
 
 Range: [0, 1]
 
@@ -309,9 +371,13 @@ Range: [0, 1]
 All configuration is in `config.py`:
 
 ```python
-DEFAULT_QAS_WEIGHT = 0.3              # QAS weight parameter
+WEIGHT_TABLE_SIM = 0.3                # W1: table similarity weight
+WEIGHT_SEMANTIC_SIM = 0.2             # W2: semantic similarity weight
+WEIGHT_LLM_SCORE = 0.3               # W3: LLM judge weight
+WEIGHT_VES = 0.2                     # W4: VES weight
 LM_STUDIO_API_URL = "http://..."      # LM Studio endpoint
-EMBEDDING_MODEL = "llama-2-7b"        # Model name (for reference)
+EMBEDDING_MODEL = "text-embedding-..."# Embedding model
+LLM_JUDGE_MODEL = "qwen2.5-7b-..."   # LLM judge model
 EXECUTION_FAILURE_PENALTY = 0.2       # Penalty if query fails
 QUERY_TIMEOUT = 30                    # Timeout in seconds
 MOCK_DATABASE_QUERIES = [...]         # Hardcoded test queries
@@ -365,17 +431,18 @@ def calculate_semantic_similarity(...):
 
 ## Performance Characteristics
 
-**Bottleneck:** LM Studio embedding API calls
+**Bottleneck:** LM Studio API calls (embeddings + LLM judge)
 
 Typical times:
-- 3 test cases: 1-2 seconds
-- 100 test cases: 30-60 seconds
-- 1000 test cases: 5-10 minutes
+- 3 test cases: 2-5 seconds
+- 100 test cases: 1-3 minutes
+- 1000 test cases: 10-30 minutes
 
 **Optimization opportunities:**
 - Embedding caching (cache embeddings locally)
 - Batch API calls (if LM Studio supports)
 - Parallel query execution
+- LLM judge caching for repeated SQL pairs
 
 ## Dependencies
 
@@ -389,10 +456,13 @@ numpy>=1.24.0       # Numerical operations (for cosine similarity)
 
 **LM Studio connection failures:**
 - Logged as warning
-- Benchmark continues with fallback (similarity = 0)
+- Benchmark continues with fallbacks:
+  - Semantic similarity = 0.5 (neutral)
+  - LLM score = 0.5 (neutral)
 
 **Query execution failures:**
 - EX set to 0
+- VES set to 0 (since EX=False)
 - Table similarity penalized (reduced by EXECUTION_FAILURE_PENALTY)
 
 **Missing input file:**

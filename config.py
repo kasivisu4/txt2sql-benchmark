@@ -1,9 +1,14 @@
 """Configuration and constants for txt2sql benchmark suite."""
 
-# Default QAS weighting parameter
-# QAS = (1 - DEFAULT_QAS_WEIGHT) * semantic_sim + DEFAULT_QAS_WEIGHT * table_sim
-# 0.7 means: 30% semantic similarity, 70% table similarity
-DEFAULT_QAS_WEIGHT = 0.7
+# ============================================================================
+# Composite Score Weights
+# ============================================================================
+# Composite = (W1 * S_T) + (W2 * S_C) + (W3 * LLM_SCORE) + (W4 * VES)
+# Weights should sum to 1.0 for a normalized [0, 1] composite score.
+WEIGHT_TABLE_SIM = 0.3  # W1: Table Similarity (S_T)
+WEIGHT_SEMANTIC_SIM = 0.2  # W2: Semantic Similarity (S_C)
+WEIGHT_LLM_SCORE = 0.3  # W3: LLM-as-Judge Score
+WEIGHT_VES = 0.2  # W4: Valid Efficiency Score
 
 # LM Studio configuration
 # LM Studio is OpenAI-compatible local inference server
@@ -24,12 +29,13 @@ COLUMN_SELECTION_LLM_ENABLED = True
 COLUMN_SELECTION_MODEL = "qwen2.5-7b-instruct"
 COLUMN_SELECTION_TEMPERATURE = 0.0
 
-# Penalty factor when table execution fails (applies to QAS calculation)
-EXECUTION_FAILURE_PENALTY = 0.2  # Reduce QAS by 20% if execution fails
+# LLM-as-Judge configuration
+# Uses a chat model to score generated SQL on a 0.0-1.0 scale.
+LLM_JUDGE_MODEL = "qwen2.5-7b-instruct"
+LLM_JUDGE_TEMPERATURE = 0.0
 
-# QAS penalty for expected output columns that are missing from the generated output.
-# Penalty applied as: weight * (missing_expected_columns / total_expected_columns)
-MISSING_COLUMN_PENALTY_WEIGHT = 0.15
+# Penalty factor when table execution fails (applies to S_T calculation)
+EXECUTION_FAILURE_PENALTY = 0.2  # Reduce S_T by 20% if execution fails
 
 # Table similarity behavior.
 # False: order-insensitive (default)

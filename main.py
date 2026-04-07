@@ -15,24 +15,28 @@ from typing import List
 
 from openai import OpenAI
 from openpyxl import Workbook
-from openpyxl.chart import LineChart, Reference
+from openpyxl.chart import BarChart, Reference
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 from model import TestCase, MetricResult
 from config import (
-    DEFAULT_QAS_WEIGHT,
+    WEIGHT_TABLE_SIM,
+    WEIGHT_SEMANTIC_SIM,
+    WEIGHT_LLM_SCORE,
+    WEIGHT_VES,
     LM_STUDIO_API_URL,
     EMBEDDING_MODEL,
-    MISSING_COLUMN_PENALTY_WEIGHT,
     SQLITE_DB_PATH,
     TABLE_SIM_ORDER_SENSITIVE,
     TABLE_SIM_ORDER_MISMATCH_WEIGHT,
     COLUMN_SELECTION_LLM_ENABLED,
     COLUMN_SELECTION_MODEL,
+    LLM_JUDGE_MODEL,
 )
 from mock_database import MockDatabaseExecutor
 from metric import run_benchmark
+from report import generate_html_report
 
 
 def load_test_cases(json_file: str) -> List[TestCase]:
@@ -91,130 +95,189 @@ def export_to_excel(
     ws_info = wb.create_sheet("Info")
     _populate_info_sheet(ws_info, summary_stats)
 
-    # Sheet 4: QAS sensitivity analysis
-    ws_analysis = wb.create_sheet("QAS Analysis")
-    _populate_qas_analysis_sheet(ws_analysis, results)
+    # Sheet 4: Interactive composite score dashboard
+    ws_dashboard = wb.create_sheet("Dashboard")
+    _populate_dashboard_sheet(ws_dashboard, results, summary_stats)
 
     # Save workbook
     wb.save(output_file)
     print(f"\n✓ Excel report saved to: {output_file}")
 
 
-def _clamp_score(value: float) -> float:
-    """Clamp score to [0, 1]."""
-    return max(0.0, min(1.0, value))
+def _populate_dashboard_sheet(
+    ws, results: List[MetricResult], summary_stats: dict
+) -> None:
+    """Populate an interactive Dashboard with editable weight cells and a live chart.
 
-
-def _populate_qas_analysis_sheet(ws, results: List[MetricResult]) -> None:
-    """Populate a weight sweep sheet and add charts for QAS sensitivity analysis."""
-    ws["A1"] = "QAS Sensitivity Analysis"
-    ws["A1"].font = Font(bold=True, size=14)
-    ws["A3"] = (
-        "Use this sheet to see how each query's QAS changes as w moves from 0.0 to 1.0."
+    Layout:
+    - Rows 1-2:  Title and instructions
+    - Rows 4-9:  Weight input table (Key | Component | Weight [yellow, editable])
+    - Row 11:    Data table header
+    - Row 12+:   Per-query scores
+                   Cols C-F: raw scores (static)
+                   Cols G-J: Excel formulas = weight_cell * raw_score
+                   Col  K:   Composite = G+H+I+J
+    - Below data: Stacked bar chart referencing cols G-J
+                  (updates automatically when weight cells change)
+    """
+    thin = Side(style="thin")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    blue_header = PatternFill(
+        start_color="4472C4", end_color="4472C4", fill_type="solid"
     )
-    ws["A4"] = (
-        "Higher w gives more weight to table similarity. Lower w gives more weight to semantic similarity."
+    dark_blue = PatternFill(
+        start_color="366092", end_color="366092", fill_type="solid"
     )
-    ws["A5"] = (
-        "Interpretation: low w focuses on SQL semantic similarity; high w focuses on result-set correctness."
+    yellow = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
+    light_blue = PatternFill(
+        start_color="DCE6F1", end_color="DCE6F1", fill_type="solid"
     )
 
-    weights = [index / 10 for index in range(11)]
-    headers = ["Weight (w)"]
-    headers.extend([f"Q{index + 1}" for index in range(len(results))])
-    headers.append("Average QAS")
+    # ── Title ─────────────────────────────────────────────────────────────────
+    ws.merge_cells("A1:K1")
+    ws["A1"].value = "Interactive Composite Score Dashboard"
+    ws["A1"].font = Font(bold=True, size=16, color="FFFFFF")
+    ws["A1"].fill = dark_blue
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 28
 
-    for col_idx, header in enumerate(headers, start=1):
-        cell = ws.cell(row=6, column=col_idx)
-        cell.value = header
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill(
-            start_color="4472C4", end_color="4472C4", fill_type="solid"
+    ws.merge_cells("A2:K2")
+    ws["A2"].value = (
+        "Edit the yellow Weight cells (column C, rows 5\u20138).  "
+        "The chart and Composite column recalculate automatically."
+    )
+    ws["A2"].font = Font(italic=True, size=10, color="595959")
+    ws["A2"].alignment = Alignment(horizontal="center")
+
+    # ── Weight input table ────────────────────────────────────────────────────
+    for col, label in [
+        (1, "Key"),
+        (2, "Component"),
+        (3, "Weight  \u270f  (edit me)"),
+    ]:
+        c = ws.cell(row=4, column=col, value=label)
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = blue_header
+        c.alignment = Alignment(horizontal="center")
+        c.border = border
+
+    weight_inputs = [
+        (5, "W1", "Table Similarity (S_T)",    summary_stats["w1"]),
+        (6, "W2", "Semantic Similarity (S_C)", summary_stats["w2"]),
+        (7, "W3", "LLM Score",                 summary_stats["w3"]),
+        (8, "W4", "VES",                       summary_stats["w4"]),
+    ]
+    for row_num, key, label, weight in weight_inputs:
+        c_key = ws.cell(row=row_num, column=1, value=key)
+        c_key.font = Font(bold=True)
+        c_key.border = border
+        c_key.alignment = Alignment(horizontal="center")
+
+        ws.cell(row=row_num, column=2, value=label).border = border
+
+        c_w = ws.cell(row=row_num, column=3, value=round(weight, 4))
+        c_w.fill = yellow
+        c_w.border = border
+        c_w.alignment = Alignment(horizontal="center")
+        c_w.number_format = "0.00"
+
+    # Sum row
+    c_sum_lbl = ws.cell(row=9, column=2, value="Sum (should equal 1.0)")
+    c_sum_lbl.font = Font(italic=True)
+    c_sum_lbl.border = border
+    c_sum = ws.cell(row=9, column=3, value="=C5+C6+C7+C8")
+    c_sum.border = border
+    c_sum.alignment = Alignment(horizontal="center")
+    c_sum.number_format = "0.00"
+
+    # ── Data table ────────────────────────────────────────────────────────────
+    TABLE_HDR = 11
+    DATA_ROW = 12
+    # Weight cell references — changing these cells updates all formulas + chart
+    W_REFS = ["$C$5", "$C$6", "$C$7", "$C$8"]
+
+    tbl_headers = [
+        "Query", "Natural Language",
+        "S_T", "S_C", "LLM", "VES",
+        "W1\u00b7S_T", "W2\u00b7S_C", "W3\u00b7LLM", "W4\u00b7VES",
+        "Composite",
+    ]
+    for col_idx, header in enumerate(tbl_headers, start=1):
+        c = ws.cell(row=TABLE_HDR, column=col_idx, value=header)
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = blue_header
+        c.alignment = Alignment(horizontal="center")
+        c.border = border
+
+    for i, result in enumerate(results):
+        r = DATA_ROW + i
+        ws.cell(row=r, column=1, value=f"Q{i + 1}").alignment = Alignment(
+            horizontal="center"
         )
-        cell.alignment = Alignment(horizontal="center")
+        ws.cell(row=r, column=2, value=result.test_case.natural_language)
 
-    for row_offset, weight in enumerate(weights, start=7):
-        ws.cell(row=row_offset, column=1).value = weight
-        qas_values = []
-        for result_index, result in enumerate(results, start=2):
-            qas_value = _clamp_score(
-                (1 - weight) * result.semantic_sim
-                + weight * result.table_sim
-                - result.missing_column_penalty
+        raw_vals = [
+            result.table_sim,
+            result.semantic_sim,
+            result.llm_score,
+            result.ves,
+        ]
+        for j, val in enumerate(raw_vals):
+            c = ws.cell(row=r, column=3 + j, value=round(val, 4))
+            c.alignment = Alignment(horizontal="center")
+            c.number_format = "0.0000"
+
+        # Formula cells: weight_ref * raw_score_cell
+        for j in range(4):
+            raw_col_letter = get_column_letter(3 + j)
+            c = ws.cell(
+                row=r,
+                column=7 + j,
+                value=f"={W_REFS[j]}*{raw_col_letter}{r}",
             )
-            ws.cell(row=row_offset, column=result_index).value = qas_value
-            qas_values.append(qas_value)
+            c.fill = light_blue
+            c.alignment = Alignment(horizontal="center")
+            c.number_format = "0.0000"
 
-        avg_qas = sum(qas_values) / len(qas_values) if qas_values else 0.0
-        ws.cell(row=row_offset, column=len(headers)).value = avg_qas
+        c_comp = ws.cell(row=r, column=11, value=f"=G{r}+H{r}+I{r}+J{r}")
+        c_comp.fill = light_blue
+        c_comp.alignment = Alignment(horizontal="center")
+        c_comp.number_format = "0.0000"
 
-    ws["N1"] = "Query Legend"
-    ws["N1"].font = Font(bold=True, size=12)
-    ws["N2"] = "Series"
-    ws["O2"] = "Natural Language"
-    for cell_ref in ["N2", "O2"]:
-        ws[cell_ref].font = Font(bold=True, color="FFFFFF")
-        ws[cell_ref].fill = PatternFill(
-            start_color="4472C4", end_color="4472C4", fill_type="solid"
+        for col in range(1, 12):
+            ws.cell(row=r, column=col).border = border
+
+    last_data_row = DATA_ROW + len(results) - 1
+
+    # ── Stacked bar chart (references formula cells → auto-updates with weights) ──
+    if results:
+        chart = BarChart()
+        chart.type = "col"
+        chart.grouping = "stacked"
+        chart.overlap = 100
+        chart.title = "Composite Score Breakdown by Query"
+        chart.y_axis.title = "Score"
+        chart.x_axis.title = "Query"
+        chart.height = 14
+        chart.width = 24
+
+        # Weighted-component columns G-J (cols 7-10); header row provides series names
+        data = Reference(
+            ws, min_col=7, max_col=10, min_row=TABLE_HDR, max_row=last_data_row
         )
+        chart.add_data(data, titles_from_data=True)
+        cats = Reference(ws, min_col=1, min_row=DATA_ROW, max_row=last_data_row)
+        chart.set_categories(cats)
+        chart.legend.position = "b"
+        ws.add_chart(chart, f"A{last_data_row + 3}")
 
-    for index, result in enumerate(results, start=1):
-        ws.cell(row=index + 2, column=14).value = f"Q{index}"
-        ws.cell(row=index + 2, column=15).value = result.test_case.natural_language
-
-    ws["N10"] = "How to Read This"
-    ws["N10"].font = Font(bold=True, size=12)
-    ws["N11"] = "w close to 0.0"
-    ws["O11"] = "More focus on SQL semantic similarity (S_C)."
-    ws["N12"] = "w close to 1.0"
-    ws["O12"] = "More focus on result-set/table similarity (S_T)."
-    ws["N13"] = "Flat line"
-    ws["O13"] = "Query score is not very sensitive to the weight choice."
-    ws["N14"] = "Steep line"
-    ws["O14"] = (
-        "Query score depends strongly on whether you prioritize semantics or execution output."
-    )
-
-    chart = LineChart()
-    chart.title = "QAS vs Weight by Query"
-    chart.style = 2
-    chart.y_axis.title = "QAS"
-    chart.x_axis.title = "Weight (w)"
-    chart.height = 10
-    chart.width = 20
-
-    data = Reference(ws, min_col=2, max_col=len(headers), min_row=6, max_row=17)
-    cats = Reference(ws, min_col=1, min_row=7, max_row=17)
-    chart.add_data(data, titles_from_data=True)
-    chart.set_categories(cats)
-    chart.legend.position = "r"
-    ws.add_chart(chart, "A20")
-
-    avg_chart = LineChart()
-    avg_chart.title = "Average QAS vs Weight"
-    avg_chart.style = 10
-    avg_chart.y_axis.title = "Average QAS"
-    avg_chart.x_axis.title = "Weight (w)"
-    avg_chart.height = 8
-    avg_chart.width = 12
-
-    avg_data = Reference(
-        ws,
-        min_col=len(headers),
-        max_col=len(headers),
-        min_row=6,
-        max_row=17,
-    )
-    avg_chart.add_data(avg_data, titles_from_data=True)
-    avg_chart.set_categories(cats)
-    ws.add_chart(avg_chart, "V20")
-
-    ws.freeze_panes = "A7"
-    ws.column_dimensions["A"].width = 12
-    for col_idx in range(2, len(headers) + 1):
-        ws.column_dimensions[get_column_letter(col_idx)].width = 12
-    ws.column_dimensions["N"].width = 10
-    ws.column_dimensions["O"].width = 40
+    # ── Column widths & freeze ────────────────────────────────────────────────
+    ws.column_dimensions["A"].width = 10
+    ws.column_dimensions["B"].width = 35
+    ws.column_dimensions["C"].width = 16
+    for col_letter in ["D", "E", "F", "G", "H", "I", "J", "K"]:
+        ws.column_dimensions[col_letter].width = 12
+    ws.freeze_panes = f"A{DATA_ROW}"
 
 
 def _populate_summary_sheet(
@@ -237,8 +300,13 @@ def _populate_summary_sheet(
     ws["A4"] = "Total Tests"
     ws["B4"] = int(summary_stats["total_tests"])
 
-    ws["A5"] = "QAS Weight (w)"
-    ws["B5"] = f"{summary_stats['weight']:.2f}"
+    ws["A5"] = "Weights"
+    ws["B5"] = (
+        f"W1(S_T)={summary_stats['w1']:.2f}  "
+        f"W2(S_C)={summary_stats['w2']:.2f}  "
+        f"W3(LLM)={summary_stats['w3']:.2f}  "
+        f"W4(VES)={summary_stats['w4']:.2f}"
+    )
 
     # Metrics
     ws["A7"] = "Metric"
@@ -251,15 +319,11 @@ def _populate_summary_sheet(
 
     row = 8
     metrics = [
-        ("EM Pass Rate", f"{summary_stats['em_pass_rate']*100:.1f}%"),
-        ("EX Pass Rate", f"{summary_stats['ex_pass_rate']*100:.1f}%"),
-        ("Avg Semantic Similarity", f"{summary_stats['avg_semantic_sim']:.4f}"),
-        ("Avg Table Similarity", f"{summary_stats['avg_table_sim']:.4f}"),
-        (
-            "Avg Missing Column Penalty",
-            f"{summary_stats['avg_missing_column_penalty']:.4f}",
-        ),
-        ("Avg QAS", f"{summary_stats['avg_qas']:.4f}"),
+        ("Avg Semantic Similarity (S_C)", f"{summary_stats['avg_semantic_sim']:.4f}"),
+        ("Avg Table Similarity (S_T)", f"{summary_stats['avg_table_sim']:.4f}"),
+        ("Avg LLM Score", f"{summary_stats['avg_llm_score']:.4f}"),
+        ("Avg VES", f"{summary_stats['avg_ves']:.4f}"),
+        ("Avg Composite Score", f"{summary_stats['avg_composite_score']:.4f}"),
         ("Total Time (ms)", f"{summary_stats['total_time_ms']:.1f}"),
     ]
 
@@ -283,16 +347,18 @@ def _populate_results_sheet(ws, results: List[MetricResult]) -> None:
         "Expected SQL",
         "EM",
         "EX",
-        "Semantic Sim",
-        "Table Sim",
-        "QAS",
+        "Semantic Sim (S_C)",
+        "Table Sim (S_T)",
+        "LLM Score",
+        "VES",
+        "Composite Score",
         "Eval Gen Columns",
         "Eval Exp Columns",
-        "Missing Expected Columns",
-        "Missing Column Penalty",
         "Column Judge Source",
         "Column Judge Confidence",
-        "Time (ms)",
+        "Gen Exec Time (ms)",
+        "Ref Exec Time (ms)",
+        "Total Time (ms)",
     ]
 
     for col_idx, header in enumerate(headers, start=1):
@@ -316,25 +382,25 @@ def _populate_results_sheet(ws, results: List[MetricResult]) -> None:
         ws.cell(row=row_idx, column=6).value = "✓" if result.ex else "✗"
         ws.cell(row=row_idx, column=7).value = f"{result.semantic_sim:.4f}"
         ws.cell(row=row_idx, column=8).value = f"{result.table_sim:.4f}"
-        ws.cell(row=row_idx, column=9).value = f"{result.qas:.4f}"
-        ws.cell(row=row_idx, column=10).value = ", ".join(
+        ws.cell(row=row_idx, column=9).value = f"{result.llm_score:.4f}"
+        ws.cell(row=row_idx, column=10).value = f"{result.ves:.4f}"
+        ws.cell(row=row_idx, column=11).value = f"{result.composite_score:.4f}"
+        ws.cell(row=row_idx, column=12).value = ", ".join(
             result.selected_generated_columns
         )
-        ws.cell(row=row_idx, column=11).value = ", ".join(
+        ws.cell(row=row_idx, column=13).value = ", ".join(
             result.selected_expected_columns
         )
-        ws.cell(row=row_idx, column=12).value = ", ".join(
-            result.missing_expected_columns
-        )
-        ws.cell(row=row_idx, column=13).value = f"{result.missing_column_penalty:.4f}"
         ws.cell(row=row_idx, column=14).value = result.column_selection_source
         ws.cell(row=row_idx, column=15).value = (
             f"{result.column_selection_confidence:.2f}"
         )
-        ws.cell(row=row_idx, column=16).value = f"{result.execution_time_ms:.1f}"
+        ws.cell(row=row_idx, column=16).value = f"{result.execution_time_gen_ms:.1f}"
+        ws.cell(row=row_idx, column=17).value = f"{result.execution_time_ref_ms:.1f}"
+        ws.cell(row=row_idx, column=18).value = f"{result.execution_time_ms:.1f}"
 
         # Center align numeric columns
-        for col in [1, 5, 6, 7, 8, 9, 13, 15, 16]:
+        for col in [1, 5, 6, 7, 8, 9, 10, 11, 15, 16, 17, 18]:
             ws.cell(row=row_idx, column=col).alignment = Alignment(horizontal="center")
 
     # Column widths
@@ -344,16 +410,18 @@ def _populate_results_sheet(ws, results: List[MetricResult]) -> None:
     ws.column_dimensions["D"].width = 40
     ws.column_dimensions["E"].width = 8
     ws.column_dimensions["F"].width = 8
-    ws.column_dimensions["G"].width = 15
-    ws.column_dimensions["H"].width = 15
+    ws.column_dimensions["G"].width = 16
+    ws.column_dimensions["H"].width = 16
     ws.column_dimensions["I"].width = 12
-    ws.column_dimensions["J"].width = 24
-    ws.column_dimensions["K"].width = 24
+    ws.column_dimensions["J"].width = 10
+    ws.column_dimensions["K"].width = 16
     ws.column_dimensions["L"].width = 24
-    ws.column_dimensions["M"].width = 18
+    ws.column_dimensions["M"].width = 24
     ws.column_dimensions["N"].width = 18
     ws.column_dimensions["O"].width = 18
-    ws.column_dimensions["P"].width = 12
+    ws.column_dimensions["P"].width = 16
+    ws.column_dimensions["Q"].width = 16
+    ws.column_dimensions["R"].width = 14
 
 
 def _populate_info_sheet(ws, summary_stats: dict) -> None:
@@ -364,35 +432,39 @@ def _populate_info_sheet(ws, summary_stats: dict) -> None:
     ws["A3"] = "Current Settings"
     ws["A3"].font = Font(bold=True, size=11)
 
-    ws["A4"] = "QAS Weight (w)"
-    ws["B4"] = f"{summary_stats['weight']:.2f}"
+    ws["A4"] = "Weights"
+    ws["B4"] = (
+        f"W1(S_T)={summary_stats['w1']:.2f}  "
+        f"W2(S_C)={summary_stats['w2']:.2f}  "
+        f"W3(LLM)={summary_stats['w3']:.2f}  "
+        f"W4(VES)={summary_stats['w4']:.2f}"
+    )
 
     ws["A5"] = "Formula"
-    ws["B5"] = "QAS = (1-w)*SemanticSim + w*TableSim - MissingColumnPenalty"
+    ws["B5"] = "Composite = (W1*S_T) + (W2*S_C) + (W3*LLM_SCORE) + (W4*VES)"
 
     ws["A6"] = "Intent-Aware Columns"
     ws["B6"] = f"enabled={COLUMN_SELECTION_LLM_ENABLED}, model={COLUMN_SELECTION_MODEL}"
 
-    ws["A7"] = "Missing Column Penalty Weight"
-    ws["B7"] = f"{MISSING_COLUMN_PENALTY_WEIGHT:.2f}"
+    ws["A7"] = "LLM Judge Model"
+    ws["B7"] = LLM_JUDGE_MODEL
 
     ws["A9"] = "Instructions for Different Weights"
     ws["A9"].font = Font(bold=True, size=11)
 
     instructions = [
-        "To test with a different weight (w), re-run the benchmark with the --weight parameter:",
+        "To test with different weights, re-run the benchmark with --w1 --w2 --w3 --w4:",
         "",
         "Examples:",
-        "  python main.py --weight 0.5    # 50% semantic, 50% table",
-        "  python main.py --weight 0.1    # 90% semantic, 10% table",
-        "  python main.py --weight 0.7    # 30% semantic, 70% table",
+        "  python main.py --w1 0.3 --w2 0.2 --w3 0.3 --w4 0.2   # Default",
+        "  python main.py --w1 0.4 --w2 0.2 --w3 0.2 --w4 0.2   # Emphasize table sim",
+        "  python main.py --w1 0.25 --w2 0.25 --w3 0.25 --w4 0.25  # Equal weights",
         "",
-        (
-            f"The default weight is {DEFAULT_QAS_WEIGHT:.1f} "
-            f"({1 - DEFAULT_QAS_WEIGHT:.0%} semantic, {DEFAULT_QAS_WEIGHT:.0%} table similarity)."
-        ),
-        "Low w means the benchmark cares more about SQL semantic similarity.",
-        "High w means the benchmark cares more about result-set correctness.",
+        "Weights should sum to 1.0 for a normalized composite score.",
+        "W1 = Table Similarity (S_T): result-set correctness",
+        "W2 = Semantic Similarity (S_C): SQL intent similarity via embeddings",
+        "W3 = LLM Score: LLM-as-judge evaluation of query quality",
+        "W4 = VES: Valid Efficiency Score (execution speed vs reference)",
     ]
 
     row = 10
@@ -400,21 +472,26 @@ def _populate_info_sheet(ws, summary_stats: dict) -> None:
         ws[f"A{row}"] = instruction
         row += 1
 
-    ws["A21"] = "Metric Definitions"
-    ws["A21"].font = Font(bold=True, size=11)
+    ws["A22"] = "Metric Definitions"
+    ws["A22"].font = Font(bold=True, size=11)
 
     definitions = [
         ("EM (Exact Match)", "Binary: 1 if normalized SQL strings match, 0 otherwise"),
         ("EX (Execution Accuracy)", "Binary: 1 if query results match, 0 otherwise"),
-        ("Semantic Similarity", "Cosine similarity of SQL embeddings [0,1]"),
-        ("Table Similarity", "Edit distance-based column similarity [0,1]"),
+        ("S_C (Semantic Similarity)", "Cosine similarity of SQL embeddings [0,1]"),
+        ("S_T (Table Similarity)", "Edit distance-based column similarity [0,1]"),
+        ("LLM Score", "LLM-as-judge evaluation of SQL quality [0,1]"),
         (
-            "QAS (Query Affinity Score)",
-            "Weighted combination of semantic and table similarity",
+            "VES (Valid Efficiency Score)",
+            "sqrt(ref_time / gen_time), capped at 1.0, 0 if EX=False",
+        ),
+        (
+            "Composite Score",
+            "Weighted combination: (W1*S_T) + (W2*S_C) + (W3*LLM) + (W4*VES)",
         ),
     ]
 
-    row = 22
+    row = 23
     for name, definition in definitions:
         ws[f"A{row}"] = name
         ws[f"A{row}"].font = Font(bold=True)
@@ -451,10 +528,28 @@ Examples:
         help="Output Excel file for report (default: results/benchmark_report.xlsx)",
     )
     parser.add_argument(
-        "--weight",
+        "--w1",
         type=float,
-        default=DEFAULT_QAS_WEIGHT,
-        help=f"QAS weight parameter (default: {DEFAULT_QAS_WEIGHT}). Formula: QAS = (1-w)*SemanticSim + w*TableSim",
+        default=WEIGHT_TABLE_SIM,
+        help=f"Weight for Table Similarity S_T (default: {WEIGHT_TABLE_SIM})",
+    )
+    parser.add_argument(
+        "--w2",
+        type=float,
+        default=WEIGHT_SEMANTIC_SIM,
+        help=f"Weight for Semantic Similarity S_C (default: {WEIGHT_SEMANTIC_SIM})",
+    )
+    parser.add_argument(
+        "--w3",
+        type=float,
+        default=WEIGHT_LLM_SCORE,
+        help=f"Weight for LLM Score (default: {WEIGHT_LLM_SCORE})",
+    )
+    parser.add_argument(
+        "--w4",
+        type=float,
+        default=WEIGHT_VES,
+        help=f"Weight for VES (default: {WEIGHT_VES})",
     )
     parser.add_argument(
         "--table-order-sensitive",
@@ -502,6 +597,7 @@ Examples:
         print(f"   ✓ Embedding model: {EMBEDDING_MODEL}")
         if COLUMN_SELECTION_LLM_ENABLED:
             print(f"   ✓ Column selection model: {COLUMN_SELECTION_MODEL}")
+        print(f"   ✓ LLM judge model: {LLM_JUDGE_MODEL}")
     except Exception as e:
         print(f"   ⚠️  Warning: Could not connect to LM Studio: {e}")
         print(f"      Make sure LM Studio is running at {LM_STUDIO_API_URL}")
@@ -515,8 +611,11 @@ Examples:
     print(f"   ✓ SQLite database initialized: {SQLITE_DB_PATH}")
 
     # Run benchmark
-    print(f"\n📊 Running benchmark with weight={args.weight:.2f}...")
-    print(f"   (QAS = (1-{args.weight:.2f})*SemanticSim + {args.weight:.2f}*TableSim)")
+    print(f"\n📊 Running benchmark...")
+    print(f"   Composite = (W1*S_T) + (W2*S_C) + (W3*LLM) + (W4*VES)")
+    print(
+        f"   W1(S_T)={args.w1:.2f}  W2(S_C)={args.w2:.2f}  W3(LLM)={args.w3:.2f}  W4(VES)={args.w4:.2f}"
+    )
     print(
         "   (Table similarity mode: "
         + ("order-sensitive" if args.table_order_sensitive else "order-insensitive")
@@ -529,7 +628,10 @@ Examples:
         test_cases,
         db_executor,
         openai_client,
-        weight=args.weight,
+        w1=args.w1,
+        w2=args.w2,
+        w3=args.w3,
+        w4=args.w4,
         table_order_sensitive=args.table_order_sensitive,
         table_order_mismatch_weight=args.table_order_mismatch_weight,
     )
@@ -539,16 +641,21 @@ Examples:
     print("SUMMARY")
     print("=" * 70)
     print(f"Total Tests:        {int(summary_stats['total_tests'])}")
-    print(f"EM Pass Rate:       {summary_stats['em_pass_rate']*100:.1f}%")
-    print(f"EX Pass Rate:       {summary_stats['ex_pass_rate']*100:.1f}%")
     print(f"Avg Semantic Sim:   {summary_stats['avg_semantic_sim']:.4f}")
     print(f"Avg Table Sim:      {summary_stats['avg_table_sim']:.4f}")
-    print(f"Avg QAS:            {summary_stats['avg_qas']:.4f}")
+    print(f"Avg LLM Score:      {summary_stats['avg_llm_score']:.4f}")
+    print(f"Avg VES:            {summary_stats['avg_ves']:.4f}")
+    print(f"Avg Composite:      {summary_stats['avg_composite_score']:.4f}")
     print(f"Total Time:         {summary_stats['total_time_ms']:.1f} ms")
 
     # Export to Excel
     print(f"\n📝 Exporting results to Excel...")
     export_to_excel(results, summary_stats, args.output)
+
+    # Export interactive HTML report
+    html_output = str(Path(args.output).with_suffix('.html'))
+    generate_html_report(results, summary_stats, html_output)
+    print(f"✓ Interactive HTML report saved to: {html_output}")
 
     print("\n" + "=" * 70)
     print("✓ Benchmark completed successfully!")
