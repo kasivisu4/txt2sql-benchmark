@@ -1,8 +1,6 @@
 """Metric calculators for txt2sql benchmark suite.
 
 Computes:
-- EM (Exact Match): Binary comparison of normalized SQL strings
-- EX (Execution Accuracy): Binary comparison of query results
 - S_C (Semantic Similarity): Cosine similarity of code embeddings from LM Studio
 - S_T (Table Similarity): Edit distance-based similarity of result tables
 - LLM Score: LLM-as-judge evaluation of generated SQL quality
@@ -415,7 +413,7 @@ def calculate_llm_score(
         reasoning = ""
         for line in raw.split("\n"):
             if line.strip().lower().startswith("reasoning:"):
-                reasoning = line.strip()[len("reasoning:"):].strip()
+                reasoning = line.strip()[len("reasoning:") :].strip()
                 break
         if not reasoning:
             reasoning = raw  # Fallback: use full response as reasoning
@@ -427,9 +425,7 @@ def calculate_llm_score(
         elif "partial" in message:
             return 0.5, reasoning
         else:
-            print(
-                f"Warning: Unexpected LLM judge response: {raw!r}, defaulting to 0.5"
-            )
+            print(f"Warning: Unexpected LLM judge response: {raw!r}, defaulting to 0.5")
             return 0.5, reasoning or "Unexpected response from LLM judge."
 
     except Exception as e:
@@ -532,13 +528,12 @@ def run_benchmark(
     """Run full benchmark on test cases.
 
     For each test case:
-    1. Calculate EM (exact match of SQL)
-    2. Execute both queries (with timing) and calculate EX
-    3. Calculate S_C (semantic similarity using embeddings)
-    4. Calculate S_T (table similarity using edit distance)
-    5. Calculate LLM Score (LLM-as-judge evaluation)
-    6. Calculate VES (valid efficiency score)
-    7. Calculate Composite Score (weighted combination)
+    1. Execute both queries (with timing) and calculate EX
+    2. Calculate S_C (semantic similarity using embeddings)
+    3. Calculate S_T (table similarity using edit distance)
+    4. Calculate LLM Score (LLM-as-judge evaluation)
+    5. Calculate VES (valid efficiency score)
+    6. Calculate Composite Score (weighted combination)
 
     Args:
         test_cases: List of test cases to benchmark
@@ -561,12 +556,7 @@ def run_benchmark(
     for i, test_case in enumerate(test_cases):
         test_start = time.time()
 
-        # Step 1: Calculate EM
-        em = normalize_sql(test_case.generated_sql) == normalize_sql(
-            test_case.expected_sql
-        )
-
-        # Step 2: Execute queries with individual timing
+        # Step 1: Execute queries with individual timing
         gen_start = time.time()
         result_gen = db_executor.execute(test_case.generated_sql)
         exec_time_gen_ms = (time.time() - gen_start) * 1000
@@ -601,7 +591,7 @@ def run_benchmark(
             projected_gen = result_gen
             projected_ref = result_ref
 
-        # Step 2b: Calculate EX
+        # Step 1b: Calculate EX (needed for VES)
         ex = (
             projected_gen.succeeded
             and projected_ref.succeeded
@@ -610,14 +600,14 @@ def run_benchmark(
             and projected_gen.rows == projected_ref.rows
         )
 
-        # Step 3: Calculate semantic similarity (S_C)
+        # Step 2: Calculate semantic similarity (S_C)
         semantic_sim = calculate_semantic_similarity(
             test_case.generated_sql,
             test_case.expected_sql,
             openai_client,
         )
 
-        # Step 4: Calculate table similarity (S_T)
+        # Step 3: Calculate table similarity (S_T)
         table_sim = _calculate_table_similarity_from_results(
             projected_gen,
             projected_ref,
@@ -629,7 +619,7 @@ def run_benchmark(
         if not result_gen.succeeded:
             table_sim *= 1 - EXECUTION_FAILURE_PENALTY
 
-        # Step 5: Calculate LLM Score
+        # Step 4: Calculate LLM Score
         llm_score, llm_reasoning = calculate_llm_score(
             test_case.natural_language,
             test_case.generated_sql,
@@ -639,10 +629,10 @@ def run_benchmark(
             openai_client,
         )
 
-        # Step 6: Calculate VES
+        # Step 5: Calculate VES
         ves = calculate_ves(ex, exec_time_gen_ms, exec_time_ref_ms)
 
-        # Step 7: Calculate Composite Score
+        # Step 6: Calculate Composite Score
         composite = calculate_composite_score(
             table_sim,
             semantic_sim,
@@ -658,8 +648,6 @@ def run_benchmark(
         test_time = (time.time() - test_start) * 1000  # Convert to ms
         result = MetricResult(
             test_case=test_case,
-            em=em,
-            ex=ex,
             semantic_sim=semantic_sim,
             table_sim=table_sim,
             llm_score=llm_score,
@@ -678,7 +666,6 @@ def run_benchmark(
 
         print(
             f"[{i+1}/{len(test_cases)}] "
-            f"EM={em} EX={ex} "
             f"S_C={semantic_sim:.3f} S_T={table_sim:.3f} "
             f"LLM={llm_score:.3f} VES={ves:.3f} "
             f"Composite={composite:.3f} "
@@ -691,12 +678,6 @@ def run_benchmark(
 
     summary_stats = {
         "total_tests": len(test_cases),
-        "em_pass_rate": (
-            sum(1 for r in results if r.em) / len(results) if results else 0
-        ),
-        "ex_pass_rate": (
-            sum(1 for r in results if r.ex) / len(results) if results else 0
-        ),
         "avg_semantic_sim": (
             sum(r.semantic_sim for r in results) / len(results) if results else 0
         ),

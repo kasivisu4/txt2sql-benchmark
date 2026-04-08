@@ -125,9 +125,7 @@ def _populate_dashboard_sheet(
     blue_header = PatternFill(
         start_color="4472C4", end_color="4472C4", fill_type="solid"
     )
-    dark_blue = PatternFill(
-        start_color="366092", end_color="366092", fill_type="solid"
-    )
+    dark_blue = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
     yellow = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
     light_blue = PatternFill(
         start_color="DCE6F1", end_color="DCE6F1", fill_type="solid"
@@ -162,10 +160,10 @@ def _populate_dashboard_sheet(
         c.border = border
 
     weight_inputs = [
-        (5, "W1", "Table Similarity (S_T)",    summary_stats["w1"]),
+        (5, "W1", "Table Similarity (S_T)", summary_stats["w1"]),
         (6, "W2", "Semantic Similarity (S_C)", summary_stats["w2"]),
-        (7, "W3", "LLM Score",                 summary_stats["w3"]),
-        (8, "W4", "VES",                       summary_stats["w4"]),
+        (7, "W3", "LLM Score", summary_stats["w3"]),
+        (8, "W4", "VES", summary_stats["w4"]),
     ]
     for row_num, key, label, weight in weight_inputs:
         c_key = ws.cell(row=row_num, column=1, value=key)
@@ -197,9 +195,16 @@ def _populate_dashboard_sheet(
     W_REFS = ["$C$5", "$C$6", "$C$7", "$C$8"]
 
     tbl_headers = [
-        "Query", "Natural Language",
-        "S_T", "S_C", "LLM", "VES",
-        "W1\u00b7S_T", "W2\u00b7S_C", "W3\u00b7LLM", "W4\u00b7VES",
+        "Query",
+        "Natural Language",
+        "S_T",
+        "S_C",
+        "LLM",
+        "VES",
+        "W1\u00b7S_T",
+        "W2\u00b7S_C",
+        "W3\u00b7LLM",
+        "W4\u00b7VES",
         "Composite",
     ]
     for col_idx, header in enumerate(tbl_headers, start=1):
@@ -345,8 +350,6 @@ def _populate_results_sheet(ws, results: List[MetricResult]) -> None:
         "Natural Language",
         "Generated SQL",
         "Expected SQL",
-        "EM",
-        "EX",
         "Semantic Sim (S_C)",
         "Table Sim (S_T)",
         "LLM Score",
@@ -378,29 +381,27 @@ def _populate_results_sheet(ws, results: List[MetricResult]) -> None:
         ws.cell(row=row_idx, column=2).value = result.test_case.natural_language
         ws.cell(row=row_idx, column=3).value = result.test_case.generated_sql
         ws.cell(row=row_idx, column=4).value = result.test_case.expected_sql
-        ws.cell(row=row_idx, column=5).value = "✓" if result.em else "✗"
-        ws.cell(row=row_idx, column=6).value = "✓" if result.ex else "✗"
-        ws.cell(row=row_idx, column=7).value = f"{result.semantic_sim:.4f}"
-        ws.cell(row=row_idx, column=8).value = f"{result.table_sim:.4f}"
-        ws.cell(row=row_idx, column=9).value = f"{result.llm_score:.4f}"
-        ws.cell(row=row_idx, column=10).value = f"{result.ves:.4f}"
-        ws.cell(row=row_idx, column=11).value = f"{result.composite_score:.4f}"
-        ws.cell(row=row_idx, column=12).value = ", ".join(
+        ws.cell(row=row_idx, column=5).value = f"{result.semantic_sim:.4f}"
+        ws.cell(row=row_idx, column=6).value = f"{result.table_sim:.4f}"
+        ws.cell(row=row_idx, column=7).value = f"{result.llm_score:.4f}"
+        ws.cell(row=row_idx, column=8).value = f"{result.ves:.4f}"
+        ws.cell(row=row_idx, column=9).value = f"{result.composite_score:.4f}"
+        ws.cell(row=row_idx, column=10).value = ", ".join(
             result.selected_generated_columns
         )
-        ws.cell(row=row_idx, column=13).value = ", ".join(
+        ws.cell(row=row_idx, column=11).value = ", ".join(
             result.selected_expected_columns
         )
-        ws.cell(row=row_idx, column=14).value = result.column_selection_source
-        ws.cell(row=row_idx, column=15).value = (
+        ws.cell(row=row_idx, column=12).value = result.column_selection_source
+        ws.cell(row=row_idx, column=13).value = (
             f"{result.column_selection_confidence:.2f}"
         )
-        ws.cell(row=row_idx, column=16).value = f"{result.execution_time_gen_ms:.1f}"
-        ws.cell(row=row_idx, column=17).value = f"{result.execution_time_ref_ms:.1f}"
-        ws.cell(row=row_idx, column=18).value = f"{result.execution_time_ms:.1f}"
+        ws.cell(row=row_idx, column=14).value = f"{result.execution_time_gen_ms:.1f}"
+        ws.cell(row=row_idx, column=15).value = f"{result.execution_time_ref_ms:.1f}"
+        ws.cell(row=row_idx, column=16).value = f"{result.execution_time_ms:.1f}"
 
         # Center align numeric columns
-        for col in [1, 5, 6, 7, 8, 9, 10, 11, 15, 16, 17, 18]:
+        for col in [1, 5, 6, 7, 8, 9, 13, 14, 15, 16]:
             ws.cell(row=row_idx, column=col).alignment = Alignment(horizontal="center")
 
     # Column widths
@@ -408,20 +409,18 @@ def _populate_results_sheet(ws, results: List[MetricResult]) -> None:
     ws.column_dimensions["B"].width = 30
     ws.column_dimensions["C"].width = 40
     ws.column_dimensions["D"].width = 40
-    ws.column_dimensions["E"].width = 8
-    ws.column_dimensions["F"].width = 8
-    ws.column_dimensions["G"].width = 16
-    ws.column_dimensions["H"].width = 16
-    ws.column_dimensions["I"].width = 12
-    ws.column_dimensions["J"].width = 10
-    ws.column_dimensions["K"].width = 16
-    ws.column_dimensions["L"].width = 24
-    ws.column_dimensions["M"].width = 24
-    ws.column_dimensions["N"].width = 18
-    ws.column_dimensions["O"].width = 18
-    ws.column_dimensions["P"].width = 16
-    ws.column_dimensions["Q"].width = 16
-    ws.column_dimensions["R"].width = 14
+    ws.column_dimensions["E"].width = 16
+    ws.column_dimensions["F"].width = 16
+    ws.column_dimensions["G"].width = 12
+    ws.column_dimensions["H"].width = 10
+    ws.column_dimensions["I"].width = 16
+    ws.column_dimensions["J"].width = 24
+    ws.column_dimensions["K"].width = 24
+    ws.column_dimensions["L"].width = 18
+    ws.column_dimensions["M"].width = 18
+    ws.column_dimensions["N"].width = 16
+    ws.column_dimensions["O"].width = 16
+    ws.column_dimensions["P"].width = 14
 
 
 def _populate_info_sheet(ws, summary_stats: dict) -> None:
@@ -653,7 +652,7 @@ Examples:
     export_to_excel(results, summary_stats, args.output)
 
     # Export interactive HTML report
-    html_output = str(Path(args.output).with_suffix('.html'))
+    html_output = str(Path(args.output).with_suffix(".html"))
     generate_html_report(results, summary_stats, html_output)
     print(f"✓ Interactive HTML report saved to: {html_output}")
 

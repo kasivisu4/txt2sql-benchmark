@@ -30,8 +30,6 @@ class MetricResult:
     """Represents computed metrics for a single test case."""
 
     test_case: TestCase
-    em: bool  # Exact Match (binary)
-    ex: bool  # Execution Accuracy (binary)
     semantic_sim: float  # Semantic similarity (S_C) [0, 1]
     table_sim: float  # Table similarity (S_T) [0, 1]
     llm_score: float  # LLM-as-Judge score [0, 1]
