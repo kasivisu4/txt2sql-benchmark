@@ -225,7 +225,7 @@ The tool generates both an **Excel** report (4 sheets: Summary, Results, Info, D
 
 ### Report Demo
 
-https://github.com/user-attachments/assets/sql_benchmark.mp4
+<video src="assets/sql_benchmark.mp4" controls width="100%"></video>
 
 ## Extending the Suite
 
