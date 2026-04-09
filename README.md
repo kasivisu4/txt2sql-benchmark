@@ -225,9 +225,7 @@ The tool generates both an **Excel** report (4 sheets: Summary, Results, Info, D
 
 ### Report Demo
 
-<video src="https://github.com/kasivisu4/txt2sql-benchmark/raw/refs/heads/master/assets/sql_benchmark.mp4" controls autoplay muted loop width="100%">
-  Your browser does not support the video tag.
-</video>
+https://github.com/user-attachments/assets/94403ba4-c30b-4549-a7dc-70b901abbf54
 
 ## Extending the Suite
 
