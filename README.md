@@ -1,6 +1,6 @@
 # txt2sql Benchmark Suite
 
-A benchmarking toolkit for evaluating text-to-SQL systems using **continuous metrics** instead of binary pass/fail scoring.
+Traditional text-to-SQL evaluations rely on Exact Match or Execution Accuracy — binary metrics that fail to capture whether generated SQL truly answers the user's natural-language intent. This suite introduces a **composite scoring framework** that intelligently balances semantic similarity of the SQL code with intent-aware result comparison, LLM-as-judge evaluation, and efficiency scoring — giving you a continuous [0,1] measure of query quality instead of pass/fail.
 
 > Currently uses SQLite (Sakila database) as the execution backend for demonstration, but the core evaluation logic is database-agnostic — it compares query results, not the database engine.
 
