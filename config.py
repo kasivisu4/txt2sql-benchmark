@@ -26,12 +26,12 @@ EMBEDDING_MODEL = "text-embedding-qwen3-embedding-8b"
 # Chat-capable model used to select the columns that matter for evaluation.
 # If unavailable, the benchmark falls back to schema-based heuristics.
 COLUMN_SELECTION_LLM_ENABLED = True
-COLUMN_SELECTION_MODEL = "qwen2.5-7b-instruct"
+COLUMN_SELECTION_MODEL = "google/gemma-4-26b-a4b"
 COLUMN_SELECTION_TEMPERATURE = 0.0
 
 # LLM-as-Judge configuration
 # Uses a chat model to score generated SQL on a 0.0-1.0 scale.
-LLM_JUDGE_MODEL = "qwen2.5-7b-instruct"
+LLM_JUDGE_MODEL = "google/gemma-4-26b-a4b"
 LLM_JUDGE_TEMPERATURE = 0.0
 
 # Penalty factor when table execution fails (applies to S_T calculation)

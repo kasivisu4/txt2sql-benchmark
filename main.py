@@ -517,8 +517,8 @@ Examples:
     parser.add_argument(
         "--input",
         type=str,
-        default="data/sakila_test_cases.json",
-        help="Input JSON file with test cases (default: data/sakila_test_cases.json)",
+        default="data/readme_examples.json",
+        help="Input JSON file with test cases (default: data/readme_examples.json)",
     )
     parser.add_argument(
         "--output",
