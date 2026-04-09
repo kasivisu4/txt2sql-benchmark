@@ -223,6 +223,10 @@ JSON array with test cases:
 
 The tool generates both an **Excel** report (4 sheets: Summary, Results, Info, Dashboard with live weight recalculation) and an **interactive HTML** report with weight sliders, radar charts, heatmaps, and execution time comparisons.
 
+### Report Demo
+
+https://github.com/user-attachments/assets/sql_benchmark.mp4
+
 ## Extending the Suite
 
 ### Using Another Database
