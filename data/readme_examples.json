@@ -1,32 +1,17 @@
 [
   {
-    "natural_language": "List all film titles",
-    "generated_sql": "SELECT title FROM film",
-    "expected_sql": "SELECT title FROM film"
+    "natural_language": "Show actor names who appeared in action films",
+    "generated_sql": "SELECT DISTINCT a.actor_id, a.first_name, a.last_name FROM actor a JOIN film_actor fa ON a.actor_id = fa.actor_id JOIN film_category fc ON fa.film_id = fc.film_id JOIN category c ON fc.category_id = c.category_id WHERE c.name = 'Action'",
+    "expected_sql": "SELECT DISTINCT a.first_name, a.last_name FROM actor a JOIN film_actor fa ON a.actor_id = fa.actor_id JOIN film_category fc ON fa.film_id = fc.film_id JOIN category c ON fc.category_id = c.category_id WHERE c.name = 'Action'"
   },
   {
-    "natural_language": "Count films per category",
-    "generated_sql": "SELECT c.name, COUNT(fc.film_id) FROM category c JOIN film_category fc ON c.category_id = fc.category_id GROUP BY c.name",
-    "expected_sql": "SELECT c.name, count(*) FROM category c JOIN film_category fc ON c.category_id = fc.category_id GROUP BY c.name"
+    "natural_language": "Get rental count per customer with their full name",
+    "generated_sql": "SELECT c.customer_id, c.first_name, c.last_name, c.email, COUNT(r.rental_id) AS rental_count FROM customer c JOIN rental r ON c.customer_id = r.customer_id GROUP BY c.customer_id",
+    "expected_sql": "SELECT c.first_name, c.last_name, COUNT(r.rental_id) AS rental_count FROM customer c JOIN rental r ON c.customer_id = r.customer_id GROUP BY c.customer_id"
   },
   {
-    "natural_language": "Count films per category",
-    "generated_sql": "SELECT c.name, c.category_id, COUNT(fc.film_id) AS film_count FROM category c JOIN film_category fc ON c.category_id = fc.category_id GROUP BY c.name",
-    "expected_sql": "SELECT c.name, COUNT(fc.film_id) AS film_count FROM category c JOIN film_category fc ON c.category_id = fc.category_id GROUP BY c.name"
-  },
-  {
-    "natural_language": "Top 10 customers by rental count",
-    "generated_sql": "SELECT c.first_name, c.last_name, COUNT(r.rental_id) AS rentals FROM customer c JOIN rental r ON c.customer_id = r.customer_id GROUP BY c.customer_id ORDER BY rentals DESC LIMIT 10",
-    "expected_sql": "SELECT c.first_name, c.last_name, COUNT(*) AS rentals FROM customer c JOIN rental r ON c.customer_id = r.customer_id GROUP BY c.first_name, c.last_name ORDER BY rentals DESC LIMIT 10"
-  },
-  {
-    "natural_language": "Actors sorted by last name",
-    "generated_sql": "SELECT first_name, last_name FROM actor ORDER BY last_name",
-    "expected_sql": "SELECT first_name, last_name FROM actor ORDER BY last_name DESC"
-  },
-  {
-    "natural_language": "Revenue per store",
-    "generated_sql": "SELECT s.store_id, SUM(p.amount) FROM store s JOIN staff st ON s.store_id = st.store_id JOIN payment p ON st.staff_id = p.staff_id GROUP BY s.store_id",
-    "expected_sql": "SELECT s.store_id, SUM(p.amount) AS revenue FROM store s JOIN inventory i ON s.store_id = i.store_id JOIN rental r ON i.inventory_id = r.inventory_id JOIN payment p ON r.rental_id = p.rental_id GROUP BY s.store_id"
+    "natural_language": "Show the title and rental rate of PG-rated films",
+    "generated_sql": "SELECT title FROM film WHERE rating = 'PG'",
+    "expected_sql": "SELECT title, rental_rate FROM film WHERE rating = 'PG'"
   }
 ]

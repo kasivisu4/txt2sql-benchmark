@@ -1,286 +1,318 @@
 # txt2sql Benchmark Suite
 
-Traditional text-to-SQL evaluations rely on Exact Match or Execution Accuracy — binary metrics that fail to capture whether generated SQL truly answers the user's natural-language intent. This suite introduces a **composite scoring framework** that intelligently balances semantic similarity of the SQL code with intent-aware result comparison, LLM-as-judge evaluation, and efficiency scoring — giving you a continuous [0,1] measure of query quality instead of pass/fail.
+Standard text-to-SQL evaluation uses two binary metrics: **Exact Match (EM)** — does the generated SQL string match the reference exactly? — and **Execution Accuracy (EX)** — do both queries return identical result sets?
 
-> Currently uses SQLite (Sakila database) as the execution backend for demonstration, but the core evaluation logic is database-agnostic — it compares query results, not the database engine.
+These are the right metrics for leaderboards. They are the wrong metrics for iterating on a system.
+
+When you're tuning prompts, comparing two model checkpoints, or debugging a text-to-SQL pipeline, you need to know *how wrong* a query is — not just *that* it is wrong. A query that returns the right answer plus one extra column is not the same failure as a query that hits the wrong table. Binary metrics cannot tell the difference.
+
+This suite introduces a **composite [0, 1] score** that measures four complementary dimensions of query quality — result correctness, SQL structural similarity, LLM holistic judgment, and execution efficiency — and combines them into a single number you can track over time.
+
+> Runs against a local SQLite [Sakila](https://github.com/jOOQ/sakila) database. The evaluation logic is database-agnostic.
+
+---
 
 ## The Problem
 
-Enterprise-grade text-to-SQL benchmarks like [BIRD](https://bird-bench.github.io/) and Spider evaluate systems with **binary metrics** — Exact Match (EM) and Execution Accuracy (EX). A query either passes or fails, and that's it.
+Consider three real queries against the Sakila DVD rental database. The user asks a question, the LLM generates SQL, and we compare it against a reference query. All three score **EM=0, EX=0** — binary metrics say they are equally wrong.
 
-Here are six real scenarios against the **Sakila** database, ranging from trivial to complex:
+---
 
-| # | User Question | Generated SQL | Expected SQL | EM | EX | What binary metrics hide |
-|---|--------------|---------------|--------------|----|----|--------------------------|
-| 1 | *List all film titles* | `SELECT title FROM film` | `SELECT title FROM film` | 1 | 1 | Perfect match — the easy case binary handles fine |
-| 2 | *Count films per category* | `SELECT c.name, COUNT(fc.film_id) FROM category c JOIN film_category fc ON c.category_id = fc.category_id GROUP BY c.name` | `SELECT c.name, count(*) FROM category c JOIN film_category fc ON c.category_id = fc.category_id GROUP BY c.name` | 0 | 1 | SQL differs (`COUNT(fc.film_id)` vs `count(*)`) but produces identical results — EM penalizes a perfectly valid query |
-| 3 | *Count films per category* | `SELECT c.name, c.category_id, COUNT(fc.film_id) AS film_count FROM category c JOIN film_category fc ON c.category_id = fc.category_id GROUP BY c.name` | `SELECT c.name, COUNT(fc.film_id) AS film_count FROM category c JOIN film_category fc ON c.category_id = fc.category_id GROUP BY c.name` | 0 | 0 | An extra `category_id` column makes EX=0, but the actual answer (name + count) is 100% correct — our intent-aware column selection would ignore the extra column |
-| 4 | *Top 10 customers by rental count* | `SELECT c.first_name, c.last_name, COUNT(r.rental_id) AS rentals FROM customer c JOIN rental r ON c.customer_id = r.customer_id GROUP BY c.customer_id ORDER BY rentals DESC LIMIT 10` | `SELECT c.first_name, c.last_name, COUNT(*) AS rentals FROM customer c JOIN rental r ON c.customer_id = r.customer_id GROUP BY c.first_name, c.last_name ORDER BY rentals DESC LIMIT 10` | 0 | 1 | Different GROUP BY strategy and COUNT style, yet same 10 customers with same counts — EM scores this as completely wrong |
-| 5 | *Actors sorted by last name* | `SELECT first_name, last_name FROM actor ORDER BY last_name` | `SELECT first_name, last_name FROM actor ORDER BY last_name DESC` | 0 | 0 | All 200 actors present, all values correct, just reversed sort order — binary treats this equally wrong as querying the wrong table entirely |
-| 6 | *Revenue per store* | `SELECT s.store_id, SUM(p.amount) FROM store s JOIN staff st ON s.store_id = st.store_id JOIN payment p ON st.staff_id = p.staff_id GROUP BY s.store_id` | `SELECT s.store_id, SUM(p.amount) AS revenue FROM store s JOIN inventory i ON s.store_id = i.store_id JOIN rental r ON i.inventory_id = r.inventory_id JOIN payment p ON r.rental_id = p.rental_id GROUP BY s.store_id` | 0 | 0 | Both are valid interpretations of "revenue per store" — one joins via staff, the other via inventory. Revenue totals are close ($33,489 vs $33,679 for store 1) because 5 payments lack rental links. Binary sees both as equally wrong |
+### Case 1 — Extra column: unnecessary primary key
 
-Scenarios 3, 5, and 6 all score **EM=0, EX=0** — yet they represent vastly different levels of correctness. One has the right answer with an extra column, another has exact values in the wrong order, and the last uses a different but reasonable query strategy. Binary metrics flatten all of this into the same "fail."
+**User:** *"Show actor names who appeared in action films"*
 
-This is fine for leaderboards. But in the current AI landscape — where teams iterate on prompts, fine-tune models, and build agentic SQL pipelines — **binary scores are not enough**. When two models both score 65% EX, you can't tell which one is closer to being right on the remaining 35%.
+| | SQL |
+|---|---|
+| **Generated** | `SELECT DISTINCT a.actor_id, a.first_name, a.last_name FROM actor a JOIN film_actor fa ON a.actor_id = fa.actor_id JOIN film_category fc ON fa.film_id = fc.film_id JOIN category c ON fc.category_id = c.category_id WHERE c.name = 'Action'` |
+| **Expected** | `SELECT DISTINCT a.first_name, a.last_name FROM actor a JOIN film_actor fa ON a.actor_id = fa.actor_id JOIN film_category fc ON fa.film_id = fc.film_id JOIN category c ON fc.category_id = c.category_id WHERE c.name = 'Action'` |
+
+The generated query returns `actor_id` alongside the requested names. The user never asked for it. The answer — the list of actor names — is there and essentially correct. Binary metrics score this **EX=0**, identical to querying the wrong table entirely.
+
+---
+
+### Case 2 — Extra columns: unrequested metadata
+
+**User:** *"Get rental count per customer with their full name"*
+
+| | SQL |
+|---|---|
+| **Generated** | `SELECT c.customer_id, c.first_name, c.last_name, c.email, COUNT(r.rental_id) AS rental_count FROM customer c JOIN rental r ON c.customer_id = r.customer_id GROUP BY c.customer_id` |
+| **Expected** | `SELECT c.first_name, c.last_name, COUNT(r.rental_id) AS rental_count FROM customer c JOIN rental r ON c.customer_id = r.customer_id GROUP BY c.customer_id` |
+
+The generated query includes `customer_id` and `email` — columns the user never asked for. The actual answer (full name + rental count for every customer) is **100% correct**. EX fails because the result sets have different columns. Binary sees this as a failure equivalent to Case 1.
+
+---
+
+### Case 3 — Missing column: incomplete answer
+
+**User:** *"Show the title and rental rate of PG-rated films"*
+
+| | SQL |
+|---|---|
+| **Generated** | `SELECT title FROM film WHERE rating = 'PG'` |
+| **Expected** | `SELECT title, rental_rate FROM film WHERE rating = 'PG'` |
+
+The generated query returns only `title`. The user explicitly asked for `rental_rate` too. This is a **genuine gap** — the answer is incomplete and would require a second query to fix. Binary scores this **EX=0**, identical to Cases 1 and 2.
+
+---
+
+### What binary metrics cannot express
+
+| # | User question | Issue | EM | EX |
+|---|--------------|-------|----|----|
+| 1 | Actor names in action films | Extra `actor_id` — answer is essentially complete | 0 | 0 |
+| 2 | Rental count per customer | Extra `customer_id`, `email` — answer is 100% correct | 0 | 0 |
+| 3 | Film titles and rental rates for PG films | Missing `rental_rate` — answer is genuinely incomplete | 0 | 0 |
+
+Three different levels of quality. One score. When two models both sit at 65% EX, you cannot tell which one is closer to being right on the remaining 35%.
 
 As Pinna et al. (2025) note, binary metrics "fail to capture the similarities and differences between equivalent SQL queries" and "overlook critical aspects such as partial correctness, structural differences, and semantic equivalence" [[1]](#references).
 
-## Our Approach
+---
 
-This suite replaces binary pass/fail with **continuous [0,1] scores** across four dimensions, then combines them into a single weighted Composite Score.
+## The Approach
 
-**The first step is intent-aware column selection.** Before computing any metric, the benchmark determines which columns actually matter for answering the user's question. An LLM (or heuristic fallback) examines the natural-language query, the generated SQL, and the expected SQL, then produces a column mapping — selecting only the relevant columns from both result sets and aligning them. This means extra columns like `category_id` in a "count movies by category" query are ignored, and evaluation focuses on the columns the user actually asked for.
+This suite replaces binary pass/fail with four complementary continuous scores, then combines them into a single weighted composite.
 
-Once the relevant columns are projected:
+### Step 1: Intent-Aware Column Selection
 
-| Metric | What it measures |
-|--------|-----------------|
-| **S_C (Semantic Similarity)** | How similar the SQL code is structurally (cosine similarity of embeddings) |
-| **S_T (Result Similarity)** | How close the projected query results are to the expected output (intent-aware edit distance) |
-| **LLM Score** | An LLM-as-judge evaluation of overall query quality, with reasoning |
-| **VES (Valid Efficiency Score)** | How fast the generated query runs relative to the reference |
-| **Composite Score** | Weighted combination: `W1*S_T + W2*S_C + W3*LLM + W4*VES` |
+Before any metric is computed, the benchmark determines which columns actually matter for answering the user's question. An LLM examines the natural-language query alongside both SQL statements and produces a column mapping — selecting only the relevant columns from both result sets and aligning them for comparison.
 
-With these metrics you can:
+This has two effects:
 
-- **See incremental progress** — a prompt change that moves S_T from 0.4 to 0.8 is invisible to EX but clearly measurable here
-- **Pinpoint failure modes** — low S_C but high S_T means the SQL looks different but produces correct results; the inverse means the SQL looks right but returns wrong data
-- **Compare models meaningfully** — two models at the same EX can have very different partial-correctness profiles
+- **Extra columns are ignored.** In Cases 1 and 2, `actor_id`, `customer_id`, and `email` are dropped before comparison. Evaluation focuses on the columns the user asked for.
+- **Missing columns surface through the judge.** In Case 3, `rental_rate` is absent from the generated result entirely. S_T has nothing to penalize — it only sees the `title` column, which matches perfectly. The LLM judge is what catches this gap and reflects it in the score.
 
-### Benchmark Results for the Same 6 Examples
+This is the complementary relationship between S_T and LLM Score: **S_T tells you whether the rows you returned are correct; LLM Score tells you whether you returned the right columns.**
 
-Here's what happens when we run the same queries through our benchmark:
+### Step 2: Four Metric Dimensions
 
-**Models used:**
-- Embedding model: `text-embedding-qwen3-embedding-8b` (for S_C)
-- Column selection & LLM judge: `google/gemma-4-26b-a4b` (for intent-aware column mapping and LLM Score)
+| Metric | What it measures | Range |
+|--------|-----------------|-------|
+| **S_T** (Result Similarity) | Edit-distance similarity between projected result sets after intent-aware column selection | [0, 1] |
+| **S_C** (Semantic Similarity) | Cosine similarity of SQL code embeddings — how structurally close the two queries are | [0, 1] |
+| **LLM Score** | LLM-as-judge holistic evaluation of correctness, completeness, and intent alignment | [0, 1] |
+| **VES** (Valid Efficiency Score) | Execution speed relative to the reference, awarded only when results are correct | [0, 1] |
 
-**Default weights:** W1(S_T)=0.3, W2(S_C)=0.2, W3(LLM)=0.3, W4(VES)=0.2
+### Step 3: Composite Score
 
-| # | User Question | EM | EX | S_C | S_T | LLM | VES | Composite | Insight |
-|---|--------------|----|----|-----|-----|-----|-----|-----------|---------|
-| 1 | *List all film titles* | 1 | 1 | 1.000 | 1.000 | 1.000 | 0.631 | 0.926 | Perfect across all dimensions |
-| 2 | *Count films per category* | 0 | 1 | 0.986 | 1.000 | 1.000 | 0.768 | 0.951 | S_C=0.986 confirms the SQL is nearly identical; S_T=1.0 shows results match perfectly |
-| 3 | *Count films per category* (extra col) | 0 | 0 | 0.978 | 1.000 | 1.000 | 0.707 | 0.937 | **EX=0 but Composite=0.937** — intent-aware column selection ignored `category_id`, so S_T=1.0 |
-| 4 | *Top 10 customers by rental count* | 0 | 1 | 0.982 | 1.000 | 1.000 | 0.000 | 0.796 | Different GROUP BY but same results; VES=0 because EX comparison found row order mismatch |
-| 5 | *Actors sorted by last name* | 0 | 0 | 0.956 | 1.000 | 1.000 | 0.000 | 0.791 | **EX=0 but S_T=1.0** — same values, reversed order. LLM=1.0 shows gemma is lenient on sort direction |
-| 6 | *Revenue per store* | 0 | 0 | 0.828 | 0.000 | 0.000 | 0.000 | 0.166 | S_C=0.828 shows SQL is structurally related; S_T=0.0 confirms results actually differ (different join paths) |
+$$\text{Composite} = W_1 \cdot S_T + W_2 \cdot S_C + W_3 \cdot \text{LLM} + W_4 \cdot \text{VES}$$
 
-Compare scenarios 3, 5, and 6 — all **EM=0, EX=0** under binary scoring, but our Composite scores are **0.937**, **0.791**, and **0.166** respectively. Now you can clearly see that #3 is essentially correct, #5 has the right data but wrong sort order, and #6 is genuinely different.
+Default weights: $W_1=0.3,\ W_2=0.2,\ W_3=0.3,\ W_4=0.2$
 
-**Note on LLM judge sensitivity:** Example 5 scored LLM=0.0 with `qwen2.5-7b-instruct` (strict on sort order) but LLM=1.0 with `gemma-4-26b-a4b` (lenient). This highlights that LLM-as-judge scores are model-dependent — choose a judge model that matches your strictness requirements.
+Weights are tunable per use case. More on this [below](#tuning-weights).
 
-### Tuning Weights for Different Analysis Goals
+---
 
-The Composite Score is `W1*S_T + W2*S_C + W3*LLM + W4*VES`. Changing the weights shifts the focus of your analysis. Here's how the same 6 queries score under different weight profiles:
+## Benchmark Results
 
-| # | Default (0.3, 0.2, 0.3, 0.2) | Result-focused (0.7, 0.1, 0.1, 0.1) | Semantic-focused (0.1, 0.7, 0.1, 0.1) | LLM-heavy (0.1, 0.1, 0.7, 0.1) |
-|---|-------------------------------|--------------------------------------|----------------------------------------|----------------------------------|
-| 1 | 0.926 | 0.963 | 0.963 | 0.963 |
-| 2 | 0.951 | 0.975 | 0.967 | 0.975 |
-| 3 | 0.937 | 0.968 | 0.955 | 0.968 |
-| 4 | 0.796 | 0.898 | 0.887 | 0.898 |
-| 5 | 0.791 | 0.896 | 0.869 | 0.896 |
-| 6 | 0.166 | 0.083 | 0.580 | 0.083 |
+Running the three cases above through the suite:
 
-**What the weight profiles reveal:**
+**Models:** embedding — `text-embedding-qwen3-embedding-8b` · column selection + judge — `google/gemma-4-26b-a4b`
 
-- **Result-focused** (high W1) — prioritizes "did the query return the right data?" Best for evaluating answer correctness.
-- **Semantic-focused** (high W2) — prioritizes "does the SQL look right structurally?" Example 6 jumps from 0.166 to 0.580 because the SQL is still somewhat similar (both are aggregations on store). Best for evaluating SQL generation quality independent of execution.
-- **LLM-heavy** (high W3) — prioritizes the LLM judge's holistic assessment. With gemma-4-26b, this profile matches Result-focused because the judge agrees with S_T on all pass/fail cases. A stricter judge model would produce different scores here.
-- **Default** — balanced view across all dimensions. Good general-purpose starting point.
+| # | User question | Issue | EM | EX | S_C | S_T | LLM | VES | **Composite** |
+|---|--------------|-------|----|----|-----|-----|-----|-----|---------------|
+| 1 | Actor names in action films | Extra `actor_id` | 0 | 0 | 0.977 | 0.964 | 1.000 | 0.000 | **0.785** |
+| 2 | Rental count per customer | Extra `customer_id`, `email` | 0 | 0 | 0.919 | 1.000 | 1.000 | 0.284 | **0.841** |
+| 3 | Film titles and rental rates | Missing `rental_rate` | 0 | 0 | 0.820 | 1.000 | 0.500 | 0.707 | **0.755** |
 
-Choose weights based on what matters most for your use case. Use the interactive Dashboard in the Excel report or the weight sliders in the HTML report to experiment in real time.
+All three score **EM=0, EX=0**. The composite scores are **0.785**, **0.841**, and **0.755**. More importantly, each score comes from a different cause — which is the point:
 
-> Run it yourself: `python main.py --input data/readme_examples.json`
+**Case 1** — `actor_id` is dropped by column selection. S_T=0.964 is near-perfect (a single duplicate name pair — two actors named `SUSAN DAVIS` — causes the small gap). LLM=1.0 confirms the answer is correct. Low composite is driven entirely by VES=0, since EX fails on the raw result sets before projection.
+
+**Case 2** — After stripping `customer_id` and `email`, the projected result is identical to the reference. S_T=1.000. LLM=1.000. This is the strongest result of the three — **EX=0, but the answer is perfect**.
+
+**Case 3** — The `title` column matches exactly, so S_T=1.000 on what was returned. But LLM=0.500 catches what S_T cannot: `rental_rate` is simply absent. The judge penalizes the incomplete answer. **This is the only case where something genuinely needs to be fixed.**
+
+Binary scoring sees all three as identical failures. This suite tells you which one is actually a problem.
+
+---
+
+## Tuning Weights
+
+The composite formula is $W_1 \cdot S_T + W_2 \cdot S_C + W_3 \cdot \text{LLM} + W_4 \cdot \text{VES}$. Shifting weights changes what the score prioritizes.
+
+| # | Default<br>(0.3, 0.2, 0.3, 0.2) | Result-focused<br>(0.7, 0.1, 0.1, 0.1) | Semantic-focused<br>(0.1, 0.7, 0.1, 0.1) | LLM-heavy<br>(0.1, 0.1, 0.7, 0.1) |
+|---|---|---|---|---|
+| 1 | 0.785 | 0.873 | 0.880 | 0.894 |
+| 2 | 0.841 | 0.920 | 0.871 | 0.920 |
+| 3 | 0.755 | 0.903 | 0.795 | 0.603 |
+
+- **Result-focused** — Case 3 climbs to 0.903 because S_T=1.0 rewards the correct `title` rows. This shows the risk: high W1 cannot penalize columns that were never returned.
+- **Semantic-focused** — Case 1 climbs to 0.880; its SQL is structurally very close to the reference (only `actor_id` added). Case 3 drops because the shorter `SELECT title` diverges more from `SELECT title, rental_rate`.
+- **LLM-heavy** — Case 3 drops sharply to 0.603. The judge has a clear view of completeness and penalizes the missing column strongly. Best profile for catching incomplete queries.
+- **Default** — balanced view. Good general-purpose starting point.
+
+![Weight tuning comparison](assets/weight_tuning.png)
+
+The left panel shows absolute composite scores per case under each profile. The right heatmap shows the delta versus the default — **C3 is the most weight-sensitive case**: it gains the most under Result-focused (+0.147, because S_T=1.0 rewards the correct rows) and drops the most under LLM-heavy (-0.153, because the judge penalizes the missing column hard).
+
+Use the interactive weight sliders in the HTML report or the Dashboard sheet in the Excel report to explore this in real time.
+
+> **Run it yourself:** `python main.py --input data/readme_examples.json`
+
+---
 
 ## Architecture
 
 ### Files
 
 ```
-model.py               # Data models and utility helpers
-config.py              # Runtime configuration and scoring weights
-metric.py              # Metric calculators and intent-aware column selection
-mock_database.py       # SQLite executor used for Sakila benchmarking
-main.py                # CLI entry point, Excel export, and HTML report
-report.py              # Interactive HTML report generator (Plotly.js)
+main.py                # CLI entry point — loads test cases, runs benchmark, exports reports
+metric.py              # All metric calculators and intent-aware column selection logic
+model.py               # Data models (TestCase, QueryResult, MetricResult, BenchmarkReport)
+config.py              # Weights, model names, API URL, and all tunable constants
+mock_database.py       # SQLite executor (Sakila) — swap this for any other database
+report.py              # Interactive HTML report (Plotly.js — sliders, radar charts, heatmaps)
 generate_chart.py      # Standalone composite score chart (matplotlib)
 requirements.txt       # Python dependencies
-README.md              # This file
-ARCHITECTURE.md        # Detailed architecture documentation
-data/                  # Input benchmark cases (JSON)
+ARCHITECTURE.md        # Detailed component documentation
+data/                  # Input test cases (JSON)
 results/               # Generated Excel and HTML reports
-sakila.db              # SQLite database used for execution testing
+sakila.db              # SQLite Sakila database
 ```
 
-### Metric Computation Flow
+### Evaluation Pipeline
+
+For each test case, the pipeline runs in order:
 
 ```
-For each test case:
-┌─────────────────────────────────────────────────────────────┐
-│ 1. Execute both queries on sakila.db                        │
-│    - Get generated and expected result sets with timing     │
-├─────────────────────────────────────────────────────────────┤
-│ 2. Intent-Aware Column Selection                            │
-│    - Use LLM chat model, or fallback heuristics             │
-│    - Select only columns required by the user query         │
-│    - Project both result sets to relevant columns           │
-├─────────────────────────────────────────────────────────────┤
-│ 3. Execution Accuracy (EX) — internal                       │
-│    - Compare projected result rows (used by VES)            │
-├─────────────────────────────────────────────────────────────┤
-│ 4. Semantic Similarity (S_C)                                │
-│    - Get embeddings from LM Studio for both SQLs            │
-│    - Compute cosine similarity → [0,1]                      │
-├─────────────────────────────────────────────────────────────┤
-│ 5. Result Similarity (S_T)                                  │
-│    - Compare projected relevant result columns              │
-│      - Find minimum edit distance to reference columns      │
-│      - Optionally penalize row-order mismatch               │
-│    - Aggregate across all columns → [0,1]                  │
-├─────────────────────────────────────────────────────────────┤
-│ 6. LLM Score                                                │
-│    - LLM-as-judge evaluates generated SQL against expected  │
-│    - Considers query intent, result correctness, style      │
-│    - Returns score [0,1] with reasoning                     │
-├─────────────────────────────────────────────────────────────┤
-│ 7. Valid Efficiency Score (VES)                              │
-│    - Measures execution speed relative to reference query   │
-│    - Only credits speed when results are correct (EX=1)     │
-├─────────────────────────────────────────────────────────────┤
-│ 8. Composite Score                                          │
-│    - Composite = W1*S_T + W2*S_C + W3*LLM + W4*VES         │
-│    - Default: W1=0.3, W2=0.2, W3=0.3, W4=0.2              │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ 1. Execute both queries against sakila.db                    │
+│    Collect result sets and wall-clock timing for each        │
+├──────────────────────────────────────────────────────────────┤
+│ 2. Intent-Aware Column Selection                             │
+│    LLM reads the user query + both SQL statements            │
+│    → identifies which columns answer the question            │
+│    → projects both result sets to those columns              │
+│    Falls back to common-column heuristics if LLM unavailable │
+├──────────────────────────────────────────────────────────────┤
+│ 3. S_T  — Result Similarity                                  │
+│    Edit distance on projected result columns → [0, 1]        │
+├──────────────────────────────────────────────────────────────┤
+│ 4. S_C  — Semantic Similarity                                │
+│    Cosine similarity of SQL embeddings → [0, 1]              │
+├──────────────────────────────────────────────────────────────┤
+│ 5. LLM Score                                                 │
+│    LLM judge evaluates intent, correctness, completeness     │
+│    → returns score [0, 1] with written reasoning             │
+├──────────────────────────────────────────────────────────────┤
+│ 6. VES  — Valid Efficiency Score                             │
+│    Speed credit relative to reference, only when EX = 1      │
+├──────────────────────────────────────────────────────────────┤
+│ 7. Composite = W1·S_T + W2·S_C + W3·LLM + W4·VES            │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+---
 
 ## Setup
 
 ### Prerequisites
 
-- **Python 3.11+**
-- **LM Studio** (or any OpenAI-compatible local inference server) — download from https://lmstudio.ai/ or use Ollama
-- **sakila.db** present in the project root
+- Python 3.11+
+- An OpenAI-compatible inference server — [LM Studio](https://lmstudio.ai/) or [Ollama](https://ollama.com/)
+- `sakila.db` in the project root
 
 ### Installation
 
-1. Clone or download the project
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Start your inference server and load the required models. Defaults in `config.py`:
-   ```python
-   LM_STUDIO_API_URL = "http://127.0.0.1:11434/v1"
-   EMBEDDING_MODEL = "text-embedding-qwen3-embedding-8b"
-   COLUMN_SELECTION_MODEL = "qwen2.5-7b-instruct"
-   LLM_JUDGE_MODEL = "qwen2.5-7b-instruct"
-   ```
+```bash
+pip install -r requirements.txt
+```
+
+Configure the inference server and model names in `config.py`:
+
+```python
+LM_STUDIO_API_URL      = "http://127.0.0.1:11434/v1"
+EMBEDDING_MODEL        = "text-embedding-qwen3-embedding-8b"
+COLUMN_SELECTION_MODEL = "google/gemma-4-26b-a4b"
+LLM_JUDGE_MODEL        = "google/gemma-4-26b-a4b"
+```
+
+---
 
 ## Usage
 
-### Basic Usage
-
 ```bash
-# Run with default settings (data/readme_examples.json)
+# Run with defaults
 python main.py
 
-# Use custom input file
-python main.py --input data/my_test_cases.json
+# Custom input / output
+python main.py --input data/my_cases.json --output results/my_report.xlsx
 
-# Specify output file
-python main.py --output results/my_report.xlsx
-
-# Adjust component weights
+# Adjust weights
 python main.py --w1 0.3 --w2 0.2 --w3 0.3 --w4 0.2
 
-# Enable strict row-order comparison for result similarity
+# Strict row-order comparison
 python main.py --table-order-sensitive
 
-# Add a soft penalty when rows are shuffled
+# Soft row-order penalty
 python main.py --table-order-mismatch-weight 0.25
 
-# Generate standalone composite score chart
-python generate_chart.py --input data/readme_examples.json --output assets/composite_analysis.png
+# Standalone chart
+python generate_chart.py --input data/readme_examples.json --output assets/chart.png
 ```
 
-### Input Format
-
-JSON array with test cases:
+### Input format
 
 ```json
 [
   {
     "natural_language": "Count employees by department",
     "generated_sql": "SELECT department, COUNT(*) FROM employees GROUP BY dept",
-    "expected_sql": "SELECT department, COUNT(*) FROM employees GROUP BY department"
+    "expected_sql":   "SELECT department, COUNT(*) FROM employees GROUP BY department"
   }
 ]
 ```
 
 ### Output
 
-The tool generates both an **Excel** report (4 sheets: Summary, Results, Info, Dashboard with live weight recalculation) and an **interactive HTML** report with weight sliders, radar charts, heatmaps, and execution time comparisons.
+- **Excel** — 4 sheets: Summary, Results, Info, and an interactive Dashboard with live weight recalculation formulas
+- **HTML** — weight sliders, radar charts per query, score heatmap, and execution time comparisons
 
 ### Report Demo
 
 https://github.com/user-attachments/assets/94403ba4-c30b-4549-a7dc-70b901abbf54
 
-## Extending the Suite
+---
 
-### Using Another Database
+## Extending
 
-Replace the SQLite executor in `mock_database.py` with your own executor:
+**Different database** — replace the executor in `mock_database.py`:
 
 ```python
 class YourDBExecutor:
     def execute(self, query: str) -> QueryResult:
-        # Connect to your database
-        # Execute and return QueryResult
-        pass
+        ...
 ```
 
-### Using Different Models
-
-Update the configured model names in `config.py`:
+**Different models** — update `config.py`. To disable LLM column selection entirely:
 
 ```python
-EMBEDDING_MODEL = "..."
-COLUMN_SELECTION_MODEL = "..."
-LLM_JUDGE_MODEL = "..."
+COLUMN_SELECTION_LLM_ENABLED = False   # falls back to common-column heuristics
 ```
 
-If you do not want LLM-based column selection:
+**New metrics** — add to `metric.py` and wire into `run_benchmark()`.
 
-```python
-COLUMN_SELECTION_LLM_ENABLED = False
-```
-
-### Adding New Metrics
-
-Add new functions to `metric.py` and update `run_benchmark()`:
-
-```python
-def calculate_custom_metric(gen_result, ref_result) -> float:
-    # Your logic here
-    return score
-```
+---
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| Cannot connect to LM Studio | Ensure inference server is running on the URL in `config.py`. Suite continues with fallback (score = 0). |
-| Column selection model not loaded | Falls back to common-column heuristics. Load the chat model for full intent-aware judging. |
-| SQLite execution fails | Ensure `sakila.db` exists in project root and SQL is valid SQLite syntax. |
-| Excel not created | Check write permissions and that `results/` directory exists. |
+| Cannot connect to inference server | Check the URL in `config.py`. The suite continues with score = 0 for LLM-dependent metrics. |
+| Column selection model not loaded | Falls back to common-column heuristics. Results will be less precise on extra-column cases. |
+| SQLite execution fails | Ensure `sakila.db` is in the project root and the SQL is valid SQLite syntax. |
+| Excel not created | Check write permissions and that the `results/` directory exists. |
+
+---
 
 ## License
 
-MIT License
+MIT
 
 ## References
 
 1. Pinna, G., Perezhohin, Y., Manzoni, L., & Castelli, M. (2025). *Redefining text-to-SQL metrics by incorporating semantic and structural similarity.* Scientific Reports, 15. https://www.nature.com/articles/s41598-025-04890-9
-2. Li, J., Hui, B., Qu, G., Yang, J., Li, B., Li, B., ... & others. (2024). *Can LLM already serve as a database interface? A big bench for large-scale database grounded text-to-SQLs.* Advances in Neural Information Processing Systems, 36. (BIRD Benchmark) https://bird-bench.github.io/
+2. Li, J., Hui, B., Qu, G., Yang, J., Li, B., Li, B., et al. (2024). *Can LLM already serve as a database interface? A big bench for large-scale database grounded text-to-SQLs.* NeurIPS 36. (BIRD Benchmark) https://bird-bench.github.io/
