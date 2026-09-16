@@ -1,4 +1,4 @@
-# txt2sql Benchmark Suite
+# Txt2sql Benchmark Suite
 
 Standard text-to-SQL evaluation uses two binary metrics: **Exact Match (EM)** — does the generated SQL string match the reference exactly? — and **Execution Accuracy (EX)** — do both queries return identical result sets?
 
